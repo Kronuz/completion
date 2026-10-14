@@ -115,3 +115,9 @@ Context-taking image preparation overloads accept that closed control and use `C
 Eleven standalone suites pass on macOS (1.11 seconds), Linux (0.25 seconds), FreeBSD (0.36 seconds) and macOS ASan/UBSan (1.80 seconds). Creation and coroutine fixtures pass fully instrumented TSan; journal suites pass on all three systems, including required-native Linux tests and the native legacy coroutine test. The fixture preconstructs three preparations, refuses further resource allocation and verifies sealing, closure, collision handling, wrong-backend rejection, held originals and failure before/after creation. Its measured PMR capacity is 2,744 bytes on Intel macOS, including the two backends, queue, controls and preparations, excluding caller payload/admission and native/runtime baselines.
 
 Relative to `38cbadb`, measured Intel macOS statistics grow from 432 to 448 bytes and native queues from 896 to 912 bytes. Optional coroutine metrics and snapshots grow from 6,480 to 6,768 bytes. Result storage remains 184 bytes, preparation 280 bytes, publication 264 bytes and the prepared capability 16 bytes. The twelve legacy arrays, primitive ordinals, journal bytes and wire formats remain unchanged; header consumers rebuild together. These are capacity measurements, not RSS or execution-time improvements.
+
+## Platform findings
+
+[docs/PLATFORM_FINDINGS.md](docs/PLATFORM_FINDINGS.md) records measured costs of durability and file
+reclamation on macOS, Linux, and FreeBSD, what this library does about each, and what
+consumers should do.

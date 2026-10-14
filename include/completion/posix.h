@@ -39,6 +39,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
+#include <vector>
 
 namespace kronuz::journal {
 
@@ -124,6 +125,26 @@ inline void file_sync(int fd) {
 	do { result = ::fsync(fd); } while (result < 0 && errno == EINTR);
 #endif
 	if (result < 0) { system_failure("durably sync journal file"); }
+}
+// Makes the descriptors durable with one device flush where the platform allows it:
+// on macOS each fsync hands its data to the drive and one F_FULLFSYNC flushes the
+// drive's cache for all; on Linux writeback starts on every file before the first
+// fsync waits.
+inline void files_sync(std::span<const int> fds) {
+	if (fds.empty()) { return; }
+#ifdef __APPLE__
+	for (int fd : fds) {
+		int result;
+		do { result = ::fsync(fd); } while (result < 0 && errno == EINTR);
+		if (result < 0) { system_failure("sync journal file"); }
+	}
+	file_sync(fds.back());
+#else
+#ifdef __linux__
+	for (int fd : fds) { (void)::sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE); }  // a hint; fsync reports errors
+#endif
+	for (int fd : fds) { file_sync(fd); }
+#endif
 }
 inline off_t checked_offset(std::uint64_t offset) {
 	if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
@@ -347,6 +368,18 @@ public:
 			if (errno == ENOENT) { return std::nullopt; } detail::system_failure("inspect storage footprint");
 		}
 		return detail::inspect_status(status);
+	}
+	void sync_files(std::span<File* const> files) override {
+		std::vector<int> fds;
+		fds.reserve(files.size());
+		for (auto* file : files) {
+			if (auto* posix = dynamic_cast<detail::PosixFile*>(file)) {
+				fds.push_back(posix->native_handle());
+			} else {
+				file->sync();
+			}
+		}
+		detail::files_sync(fds);
 	}
 	void sync_directory() override {
 		int result;
