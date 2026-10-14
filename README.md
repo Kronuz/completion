@@ -3,12 +3,12 @@
 `completion::completion` is a protocol-independent, C++20 header-only I/O module. It provides trusted-directory POSIX file operations, owned primitive requests and authentic results, completion statistics, and native Linux and BSD/macOS completion backends. It does not fetch dependencies or include journal formats, consensus, HTTP, or reactor code.
 
 ```sh
-cmake -S completion -B .scratch/completion -DCMAKE_BUILD_TYPE=Release
-cmake --build .scratch/completion -j2
-ctest --test-dir .scratch/completion --output-on-failure
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j2
+ctest --test-dir build --output-on-failure
 ```
 
-New consumers include `completion/api.h` and use `kronuz::io::completion`. Existing `journal/` include paths and canonical `journal::journal` types remain available through forwarding headers. These aliases preserve type identity and existing source APIs; consumers must rebuild against the matching headers. No journal bytes or legacy cluster wire encodings change.
+New consumers include `completion/api.h` and use `kronuz::io::completion`. Link `completion::completion`, or `completion::asio` for the Asio adapter; the I/O types keep the `kronuz::journal` namespace they had when this module was part of the journal.
 
 An operation owns every filename, buffer and file lease referenced by its request. Once a driver accepts a request, it retains that operation until the original primitive completes. Cancellation cannot fabricate a result, release accepted buffers, or refund outstanding admission. The owner consumes the typed result before deciding whether an obsolete consumer still needs a continuation. A failed driver with outstanding accepted work cannot safely pretend that work completed.
 
