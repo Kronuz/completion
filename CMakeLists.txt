@@ -1,0 +1,46 @@
+cmake_minimum_required(VERSION 3.16)
+project(completion LANGUAGES CXX)
+
+# Completion-based file I/O: native backends (io_uring on Linux, kqueue on BSD and macOS,
+# a thread pool elsewhere), image publication, and directory scans. Header-only.
+include(FetchContent)
+FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG 9d7e724d596eb70cc3122672c7efec3d7f570f35)
+FetchContent_MakeAvailable(metrics)
+
+find_package(Threads REQUIRED)
+add_library(completion INTERFACE)
+target_include_directories(completion INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
+target_compile_features(completion INTERFACE cxx_std_20)
+target_link_libraries(completion INTERFACE Threads::Threads metrics::metrics)
+add_library(completion::completion ALIAS completion)
+
+# Optional Asio adapter; the host supplies standalone Asio. No fetch here.
+add_library(completion_asio INTERFACE)
+target_link_libraries(completion_asio INTERFACE completion::completion)
+target_compile_definitions(completion_asio INTERFACE ASIO_STANDALONE)
+if(ASIO_INCLUDE_DIR)
+  target_include_directories(completion_asio INTERFACE "${ASIO_INCLUDE_DIR}")
+endif()
+add_library(completion::asio ALIAS completion_asio)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  include(CTest)
+  if(BUILD_TESTING)
+    foreach(t core allocation resource posix_resource scan inspection cursor_close reuse image_close create_into)
+      add_executable(completion_${t}_test test/${t}_test.cc)
+      target_link_libraries(completion_${t}_test PRIVATE completion::completion)
+    endforeach()
+    # Tests that work on files take a state directory.
+    foreach(t allocation resource)
+      add_test(NAME completion_${t} COMMAND completion_${t}_test)
+    endforeach()
+    foreach(t core posix_resource scan inspection cursor_close reuse image_close create_into)
+      add_test(NAME completion_${t} COMMAND completion_${t}_test "${CMAKE_CURRENT_BINARY_DIR}/${t}-state")
+    endforeach()
+    if(ASIO_INCLUDE_DIR)
+      add_executable(completion_asio_extension_test test/asio_extension_test.cc)
+      target_link_libraries(completion_asio_extension_test PRIVATE completion::asio)
+      add_test(NAME completion_asio_extension COMMAND completion_asio_extension_test "${CMAKE_CURRENT_BINARY_DIR}/asio-extension-state")
+    endif()
+  endif()
+endif()

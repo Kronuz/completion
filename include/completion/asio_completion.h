@@ -23,7 +23,7 @@
 #pragma once
 
 #include "completion.h"
-#include "metrics.h"
+#include "metrics.hh"
 #include <asio.hpp>
 #include <asio/experimental/awaitable_operators.hpp>
 #include <chrono>

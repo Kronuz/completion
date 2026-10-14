@@ -23,7 +23,7 @@
 #include "completion/api.h"
 #include "completion/image.h"
 #include "completion/native_completion.h"
-#include "journal/operation.h"
+#include "completion/operation.h"
 #include <array>
 #include <chrono>
 #include <filesystem>
