@@ -71,3 +71,34 @@ durable commit must not report the commit as failed or fence the writer: keep th
 queued and retry. If the manifests' removal could not be followed by a directory sync,
 owe that sync before queuing their data files. `PosixIO::remove` treats a missing file as
 success.
+
+## 4. Space from a removed file is free only once the removal is durable
+
+Filesystems release an unlinked file's blocks when the unlink reaches the journal or
+transaction commit, and a crash before that leaves the file in place. Admission that
+counts the bytes as free at the unlink admits work the disk then refuses (strata's
+review, L8: a transaction admitted by draining a reclaim queue failed every commit with
+ENOSPC until something synced the directory).
+
+**For a consumer:** keep a removed file's bytes charged until the next directory barrier
+returns; a drain that removes files to make room takes that barrier before admitting.
+Likewise, an operation that reserved space and then drains must keep its own reservation
+through the drain (strata's L5).
+
+## 5. Unreliable reads: retry once, then report damage
+
+Field studies of 1.5 million disks found latent sector errors on 3.45% of disks within 32
+months and silent corruption on 0.86% of nearline disks within 17 months. Transient
+faults (a read that fails or returns wrong bytes once) are also routine at scale.
+
+strata now reads a file and its checksums again once when either fails: a transient
+fault heals, and damage reports as corruption, a read error included, so the caller
+repairs from a replica or an older generation. Under faultfs media faults at 782 offsets
+of every file, every transient fault healed and no read ever returned a wrong answer.
+Details: strata `docs/design/media-faults.md`.
+
+**For a consumer:** a journal or checkpoint reader that fences on the first failed read
+treats a transient fault as damage. Retrying the read once before fencing keeps the
+fail-closed guarantee and removes those false positives. A truncated-looking tail in a
+consensus log is not necessarily torn: protocol-aware recovery (Alagappan et al., FAST
+2018) distinguishes a damaged acknowledged entry from an unacknowledged torn write.
