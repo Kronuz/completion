@@ -22,6 +22,7 @@ durable, then a directory barrier; median of 15 rounds.
 | 9 files | One full sync each | Batched | Batched form |
 |---|---:|---:|---|
 | macOS x86_64 APFS | 214 ms | 46 ms | `fsync` each, then one `F_FULLFSYNC` |
+| macOS arm64 APFS (M1 Pro) | 45 ms | 12 ms | `fsync` each, then one `F_FULLFSYNC` |
 | Linux ext4 | 31.9 ms | 9.5 ms | `sync_file_range(SYNC_FILE_RANGE_WRITE)` on all, then `fsync` each |
 | FreeBSD UFS | 13.4 ms | 11.1 ms | `aio_fsync` all (`fdatasync` each: 8.6 ms) |
 
