@@ -155,9 +155,7 @@ int main(int argc, char **argv) {
 		resource.reset();
 		check(!counts.destroyed && file->size() == 7 && cursor->next().has_value());
 		cursor.reset();
-		{
-			std::jthread release([held = std::move(file)]() mutable { held.reset(); });
-		}
+		std::thread([held = std::move(file)]() mutable { held.reset(); }).join();
 		check(counts.destroyed && counts.used == 0);
 		std::filesystem::remove_all(directory);
 		std::cout << "managed POSIX admission and surviving controls passed\n";

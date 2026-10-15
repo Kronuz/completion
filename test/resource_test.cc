@@ -135,7 +135,7 @@ int main() {
 				std::allocate_shared<int>(c::OwnedAllocator<int>(c::AllocationContext(resource)), 42);
 			weak = owner;
 			resource.reset();
-			std::jthread releaser([held = std::move(owner)]() mutable { held.reset(); });
+			std::thread([held = std::move(owner)]() mutable { held.reset(); }).join();
 		}
 		check(weak.expired() && !retained.destroyed && retained.used > 0);
 		weak.reset();
