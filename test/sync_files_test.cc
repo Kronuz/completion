@@ -21,7 +21,8 @@
  */
 
 // IO::sync_files: PosixIO's files share the batched flush, a file of another backend
-// falls back to its own sync, and every file reads back whole afterwards.
+// falls back to its own sync, and every file reads back whole afterwards. File::sync_data
+// likewise.
 #include "completion/posix.h"
 #include <filesystem>
 #include <iostream>
@@ -88,6 +89,15 @@ int main(int argc, char **argv) {
 		check(back.size() == std::size_t(4096 * (i + 1)), "size");
 		check(file->read_at(0, back) == back.size() && back == std::string(back.size(), char('a' + i)), "content");
 	}
+	// sync_data: PosixIO's data barrier, and the default (sync) for another backend.
+	auto data = io.create_exclusive("data");
+	check(data->write_at(0, "durable") == 7, "write before sync_data");
+	data->sync_data();
+	Counted counted(io.open_existing("f0"), foreign);
+	counted.sync_data();
+	check(foreign == 2, "a backend without sync_data syncs");
+	std::string back(7, '\0');
+	check(io.open_existing("data")->read_at(0, back) == 7 && back == "durable", "sync_data keeps the bytes");
 	std::cout << "sync_files: ok\n";
 	return 0;
 }

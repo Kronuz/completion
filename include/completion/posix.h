@@ -126,6 +126,17 @@ inline void file_sync(int fd) {
 #endif
 	if (result < 0) { system_failure("durably sync journal file"); }
 }
+// fdatasync on Linux; F_FULLFSYNC on macOS, whose fdatasync leaves data in the drive's
+// cache; fsync elsewhere.
+inline void file_sync_data(int fd) {
+#ifdef __linux__
+	int result;
+	do { result = ::fdatasync(fd); } while (result < 0 && errno == EINTR);
+	if (result < 0) { system_failure("durably sync journal data"); }
+#else
+	file_sync(fd);
+#endif
+}
 // Makes the descriptors durable with one device flush where the platform allows it:
 // on macOS each fsync hands its data to the drive and one F_FULLFSYNC flushes the
 // drive's cache for all; on Linux writeback starts on every file before the first
@@ -221,6 +232,7 @@ public:
 		if (result < 0) { system_failure("truncate journal tail"); }
 	}
 	void sync() override { file_sync(fd_); }
+	void sync_data() override { file_sync_data(fd_); }
 	EntryInspection inspect() override {
 		struct stat status{};
 		if (::fstat(fd_, &status)) { system_failure("inspect held file"); }

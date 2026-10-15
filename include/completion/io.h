@@ -68,6 +68,9 @@ public:
 	virtual std::size_t write_at(std::uint64_t offset, std::string_view bytes) = 0;
 	virtual void truncate(std::uint64_t size) = 0;
 	virtual void sync() = 0;
+	// Makes written bytes durable, with the metadata needed to read them back; other
+	// metadata (times) may lag. For preallocated files, where no write changes the size.
+	virtual void sync_data() { sync(); }
 	virtual EntryInspection inspect() { throw std::logic_error("held-file inspection unsupported"); }
 	// Fresh handles only: converting a shared lock may release its protection.
 	// False means busy, never a blocking wait. Errors remain exceptional.
