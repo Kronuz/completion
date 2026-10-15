@@ -102,3 +102,17 @@ treats a transient fault as damage. Retrying the read once before fencing keeps 
 fail-closed guarantee and removes those false positives. A truncated-looking tail in a
 consensus log is not necessarily torn: protocol-aware recovery (Alagappan et al., FAST
 2018) distinguishes a damaged acknowledged entry from an unacknowledged torn write.
+
+## 6. macOS libc++ reads `std::cin` a character at a time
+
+On macOS, libc++'s `std::cin` reads through `getc`, which locks stdin for every
+character, and `std::ios::sync_with_stdio(false)` does not change it. Feeding 300,000
+documents to strata's indexer through `std::getline(std::cin, ...)` took 64.5 s on the
+M1; reading stdin with `read(2)`, up to 1 MiB at a time, took 7.9 s for byte-identical
+output (strata `148eebb`). A profile shows the time in `__stdinbuf::__getchar`, `getc`,
+and `pthread_mutex_lock`/`unlock`.
+
+**For a consumer:** any macOS tool that streams input through `std::cin` (a bulk loader,
+a replay, a benchmark driver) pays this per character. Read the file descriptor in large
+blocks instead; `read(2)` returns what is available, so an interactive peer still gets
+its answer.
