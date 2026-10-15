@@ -1,6 +1,6 @@
 # Owned I/O completions
 
-[![CI](https://github.com/Kronuz//actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz//actions/workflows/ci.yml)
+[![CI](https://github.com/Kronuz/completion/actions/workflows/ci.yml/badge.svg)](https://github.com/Kronuz/completion/actions/workflows/ci.yml)
 
 `completion::completion` is a protocol-independent, C++20 header-only I/O module. It provides trusted-directory POSIX file operations, owned primitive requests and authentic results, completion statistics, and native Linux and BSD/macOS completion backends. It does not fetch dependencies or include journal formats, consensus, HTTP, or reactor code.
 
