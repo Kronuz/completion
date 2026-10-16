@@ -32,8 +32,21 @@
 
 namespace c = kronuz::io::completion;
 namespace {
+// TSan's runtime replaces operator new itself, so its builds cannot count allocations.
+#if defined(__SANITIZE_THREAD__)
+#define COMPLETION_COUNTS_ALLOCATIONS 0
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define COMPLETION_COUNTS_ALLOCATIONS 0
+#endif
+#endif
+#ifndef COMPLETION_COUNTS_ALLOCATIONS
+#define COMPLETION_COUNTS_ALLOCATIONS 1
+#endif
 thread_local bool watching = false;
 thread_local std::size_t allocations = 0;
+// Counted allocations, or none claimed when the build cannot count them.
+bool no_allocations() { return !COMPLETION_COUNTS_ALLOCATIONS || allocations == 0; }
 void check(bool value) {
 	if (!value)
 		throw std::runtime_error("caller-buffer scan invariant failed");
@@ -120,6 +133,7 @@ class NextOperation final : public c::Operation {
 	bool submitted_ = false, done_ = false;
 };
 } // namespace
+#if COMPLETION_COUNTS_ALLOCATIONS
 void *operator new(std::size_t bytes) {
 	if (watching)
 		++allocations;
@@ -129,6 +143,7 @@ void *operator new(std::size_t bytes) {
 }
 void operator delete(void *pointer) noexcept { std::free(pointer); }
 void operator delete(void *pointer, std::size_t) noexcept { std::free(pointer); }
+#endif
 int main(int argc, char **argv) {
 	try {
 		if (argc != 2)
@@ -149,7 +164,7 @@ int main(int argc, char **argv) {
 			auto size = cursor->next_into(scratch);
 			auto end = cursor->next_into(scratch);
 			watching = false;
-			check(size == 255 && !end && allocations == 0 &&
+			check(size == 255 && !end && no_allocations() &&
 				  std::string_view(scratch.data(), *size) == long_name);
 			std::cout << "255-byte name and EOF global allocations: " << allocations << '\n';
 			cursor = io.scan_directory();

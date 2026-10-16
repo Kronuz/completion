@@ -27,8 +27,21 @@
 
 namespace c = kronuz::io::completion;
 namespace {
+// TSan's runtime replaces operator new itself, so its builds cannot count allocations.
+#if defined(__SANITIZE_THREAD__)
+#define COMPLETION_COUNTS_ALLOCATIONS 0
+#elif defined(__has_feature)
+#if __has_feature(thread_sanitizer)
+#define COMPLETION_COUNTS_ALLOCATIONS 0
+#endif
+#endif
+#ifndef COMPLETION_COUNTS_ALLOCATIONS
+#define COMPLETION_COUNTS_ALLOCATIONS 1
+#endif
 thread_local bool watching = false;
 thread_local std::size_t allocations = 0;
+// Counted allocations, or none claimed when the build cannot count them.
+bool no_allocations() { return !COMPLETION_COUNTS_ALLOCATIONS || allocations == 0; }
 void check(bool value) {
 	if (!value)
 		throw std::runtime_error("completion allocation invariant failed");
@@ -101,7 +114,7 @@ void managed_images(const std::shared_ptr<UnusedIO> &io, const std::shared_ptr<c
 	watching = true;
 	auto job = c::make_image_preparation(context, io, lease, token, std::string_view(candidate), bytes, 7);
 	watching = false;
-	check(allocations == 0 && resource->calls == 3 && resource->used > candidate.size());
+	check(no_allocations() && resource->calls == 3 && resource->used > candidate.size());
 	unsigned destroyed = 0;
 	auto file = std::make_unique<TrackedFile>(destroyed);
 	const auto admitted = resource->used;
@@ -116,7 +129,7 @@ void managed_images(const std::shared_ptr<UnusedIO> &io, const std::shared_ptr<c
 		job->submitted();
 		check(job->complete(std::move(result)));
 		watching = false;
-		check(allocations == 0 && resource->used == admitted && resource->calls == 3);
+		check(no_allocations() && resource->used == admitted && resource->calls == 3);
 	}
 	auto prepared = job->prepared();
 	check(prepared.name() == candidate && prepared.allocation_context().resource() == resource.get());
@@ -138,7 +151,7 @@ void managed_images(const std::shared_ptr<UnusedIO> &io, const std::shared_ptr<c
 	watching = true;
 	auto publication = c::make_image_publication(std::move(prepared), selected, token);
 	watching = false;
-	check(allocations == 0 && resource->calls == 2 && publication->request().destination == selected);
+	check(no_allocations() && resource->calls == 2 && publication->request().destination == selected);
 	while (!publication->done()) {
 		c::Result result;
 		result.token = publication->request().token;
@@ -146,7 +159,7 @@ void managed_images(const std::shared_ptr<UnusedIO> &io, const std::shared_ptr<c
 		publication->submitted();
 		check(publication->complete(std::move(result)));
 		watching = false;
-		check(allocations == 0);
+		check(no_allocations());
 	}
 	check(!publication->uncertain());
 	std::weak_ptr<c::ImagePublication> weak = publication;
@@ -158,6 +171,7 @@ void managed_images(const std::shared_ptr<UnusedIO> &io, const std::shared_ptr<c
 	std::cout << "managed preparation allocations: 3; publication: 2; unmanaged: 0\n";
 }
 } // namespace
+#if COMPLETION_COUNTS_ALLOCATIONS
 void *operator new(std::size_t bytes) {
 	if (watching)
 		++allocations;
@@ -167,6 +181,7 @@ void *operator new(std::size_t bytes) {
 }
 void operator delete(void *pointer) noexcept { std::free(pointer); }
 void operator delete(void *pointer, std::size_t) noexcept { std::free(pointer); }
+#endif
 int main() {
 	try {
 		auto io = std::make_shared<UnusedIO>();
@@ -185,7 +200,7 @@ int main() {
 		const bool accepted = job->complete(std::move(completion));
 		watching = false;
 		std::cout << "Create completion allocations: " << allocations << '\n';
-		check(accepted && !job->error() && allocations == 0);
+		check(accepted && !job->error() && no_allocations());
 		auto held_file = job->request().file;
 		check(held_file && held_file->size() == 7 && destroyed == 0);
 		lease.reset();
