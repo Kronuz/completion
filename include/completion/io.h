@@ -58,6 +58,16 @@ struct ManagedCapabilities {
 	}
 };
 
+// A read-only view of a whole file as it was when mapped, valid while the handle lives,
+// even after the file is unlinked or replaced.
+class Mapping {
+public:
+	virtual ~Mapping() = default;
+	std::string_view bytes() const noexcept { return bytes_; }
+protected:
+	std::string_view bytes_;
+};
+
 // Implementations own a trusted, already-created directory. Names are single
 // components; ownership and file-type checks belong to the implementation.
 class File {
@@ -78,6 +88,9 @@ public:
 	// Called by a retained worker-side original after preceding work settles.
 	// Supporting backends consume the native handle even on error; never retry.
 	virtual void close() { throw std::logic_error("explicit file close unsupported"); }
+	// The whole file, read-only, without copying it; null when the backend cannot map,
+	// so callers read instead. Writes through other handles are not promised to show.
+	virtual std::shared_ptr<const Mapping> map() { return nullptr; }
 };
 
 class OwnerLock {

@@ -36,6 +36,7 @@
 #include <string>
 #include <system_error>
 #include <sys/file.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #include <utility>
@@ -261,7 +262,27 @@ public:
 		lease_ = false;
 		if (::close(descriptor)) { system_failure("close held file"); }
 	}
+	std::shared_ptr<const Mapping> map() override {
+		const std::uint64_t length = size();
+		if (length > std::numeric_limits<std::size_t>::max()) { throw std::runtime_error("file too large to map"); }
+		return std::make_shared<PosixMapping>(fd_, static_cast<std::size_t>(length));
+	}
 private:
+	// The mapping keeps its pages after the descriptor closes or the file is unlinked.
+	class PosixMapping final : public Mapping {
+	public:
+		PosixMapping(int fd, std::size_t length) {
+			if (length == 0) { return; }
+			void* at = ::mmap(nullptr, length, PROT_READ, MAP_SHARED, fd, 0);
+			if (at == MAP_FAILED) { system_failure("map file"); }
+			bytes_ = std::string_view(static_cast<const char*>(at), length);
+		}
+		~PosixMapping() override {
+			if (!bytes_.empty()) { ::munmap(const_cast<char*>(bytes_.data()), bytes_.size()); }
+		}
+		PosixMapping(const PosixMapping&) = delete;
+		PosixMapping& operator=(const PosixMapping&) = delete;
+	};
 	int fd_;
 	bool lease_ = false;
 };
