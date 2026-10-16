@@ -138,19 +138,45 @@ inline void file_sync_data(int fd) {
 	file_sync(fd);
 #endif
 }
-// Makes the descriptors durable with one device flush where the platform allows it:
-// on macOS each fsync hands its data to the drive and one F_FULLFSYNC flushes the
-// drive's cache for all; on Linux writeback starts on every file before the first
-// fsync waits.
+template <class Calls> inline void files_sync_devices(std::span<const int> fds, Calls& calls) {
+	if (fds.empty()) { return; }
+	struct DeviceFile { dev_t device; int fd; };
+	std::vector<DeviceFile> devices;
+	devices.reserve(fds.size());
+	for (int fd : fds) {
+		struct stat status{};
+		int result;
+		do { result = calls.stat(fd, &status); } while (result < 0 && errno == EINTR);
+		if (result < 0) { system_failure("stat journal file"); }
+		devices.push_back({status.st_dev, fd});
+	}
+	std::sort(devices.begin(), devices.end(), [](const DeviceFile& a, const DeviceFile& b) { return a.device < b.device; });
+	for (int fd : fds) {
+		int result;
+		do { result = calls.sync(fd); } while (result < 0 && errno == EINTR);
+		if (result < 0) { system_failure("sync journal file"); }
+	}
+	for (std::size_t i = 0; i < devices.size(); ++i) {
+		if (i && devices[i].device == devices[i - 1].device) { continue; }
+		int result;
+		do { result = calls.full_sync(devices[i].fd); } while (result < 0 && errno == EINTR);
+		if (result < 0) { system_failure("durably sync journal file"); }
+	}
+}
+#ifdef __APPLE__
+struct DeviceSyncCalls {
+	int stat(int fd, struct stat* status) const { return ::fstat(fd, status); }
+	int sync(int fd) const { return ::fsync(fd); }
+	int full_sync(int fd) const { return ::fcntl(fd, F_FULLFSYNC); }
+};
+#endif
+// macOS stages every file before flushing each distinct device; Linux starts writeback
+// on every file before the first fsync waits.
 inline void files_sync(std::span<const int> fds) {
 	if (fds.empty()) { return; }
 #ifdef __APPLE__
-	for (int fd : fds) {
-		int result;
-		do { result = ::fsync(fd); } while (result < 0 && errno == EINTR);
-		if (result < 0) { system_failure("sync journal file"); }
-	}
-	file_sync(fds.back());
+	DeviceSyncCalls calls;
+	files_sync_devices(fds, calls);
 #else
 #ifdef __linux__
 	for (int fd : fds) { (void)::sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE); }  // a hint; fsync reports errors

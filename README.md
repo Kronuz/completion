@@ -20,6 +20,17 @@ The POSIX backend requires a caller-created, exclusively owned directory with tr
 
 The standalone test exercises create, write, file synchronization, replace, directory synchronization and reopening, and verifies that a rejected unsafe path produces an authentic error completion. Existing journal and consensus tests continue to qualify the shared native drivers and their ownership rules.
 
+## Batched file synchronization
+
+`IO::sync_files(std::span<File* const>)` makes every supplied file durable, including files from different backends or devices. `PosixIO` calls each foreign backend's `File::sync()`. On macOS it calls `fsync` on every POSIX file, then `F_FULLFSYNC` once per distinct `st_dev`; Linux starts writeback before calling `fsync` on every file, and other POSIX platforms call `fsync` on every file. An empty batch does nothing. A failed batch leaves which files are durable unspecified.
+
+Keep every file alive and open until the call returns, and take a separate directory barrier for new or replaced names. [examples/demo.cc](examples/demo.cc) creates `batch-example` in each of two empty, caller-owned directories, which may reside on different devices:
+
+```sh
+cmake --build build --target completion_demo
+build/completion_demo /path/to/first-private-directory /path/to/second-private-directory
+```
+
 ## Opaque image jobs
 
 `make_posix_io(context, directory, mode)` admits the backend's outer shared control. Its context-first constructor admits concrete file, directory cursor and owner-lock controls before opening their native handles. These controls preserve the existing `unique_ptr<File>`, `unique_ptr<DirectoryCursor>` and `unique_ptr<OwnerLock>` types; private allocation headers retain the PMR owner through default virtual deletion, including constructor failure. Files and cursors can outlive the backend; the existing owner-lock requirement to retain its backend still applies. POSIX syscall names use bounded inline NUL-terminated storage. The legacy `DirectoryCursor::next()` return string and libc's directory buffer remain outside this accounting; managed inventory uses the opt-in caller-buffer interface described below.

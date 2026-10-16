@@ -10,7 +10,7 @@ Platforms: macOS 15.8 x86_64 APFS (i9-9980HK, internal SSD), Linux 6.8 x86_64 ex
 (QEMU/HVF gate VM, virtio, `cache=none`), FreeBSD 14.4 x86_64 UFS with soft updates
 (VM, virtio), and macOS 27 arm64 APFS (M1 Pro) where noted.
 
-## 1. Make many files durable with one device flush: `IO::sync_files`
+## 1. Make many files durable with one flush per device: `IO::sync_files`
 
 A durable commit that syncs each new file separately pays one device flush per file.
 On macOS `File::sync` is `F_FULLFSYNC`, which flushes the drive's whole cache, so the
@@ -30,10 +30,16 @@ Also measured: concurrent `fsync` threads (APFS 107 ms, ext4 14.7 ms, UFS 10.7 m
 one `syncfs` on Linux (10.1 ms, but it flushes every file on the filesystem).
 
 **In this library:** `IO::sync_files(std::span<File* const>)`. The default calls
-`File::sync` on each. `PosixIO` batches its own files: on macOS, `fsync` each, then one
-`F_FULLFSYNC`; on Linux, start writeback on every file, then `fsync` each; elsewhere
-(FreeBSD), `fsync` each, unchanged for now. A file from another backend falls back to its
-own `sync`. After a failure, which files are durable is unspecified.
+`File::sync` on each. `PosixIO` batches POSIX files from any backend: on macOS, `fsync`
+each, then one `F_FULLFSYNC` per distinct `st_dev`; on Linux, start writeback on every
+file, then `fsync` each; elsewhere (FreeBSD), `fsync` each, unchanged for now. A file
+from another backend falls back to its own `sync`. After a failure, which files are
+durable is unspecified.
+
+The measured batches above reside on one device. The cross-device regression models
+separate device caches, checks that every file is staged before any cache is flushed,
+and injects interrupted and failed stat, staging and full-flush calls. It exercises the
+same grouping code on all platforms; actual power-loss behavior is outside that test.
 
 **In strata** (commit of flushed segments, live-docs files, and metadata as one batch;
 the soak workload, 48 commits per side, interleaved): macOS commit phase 187 → 106 ms

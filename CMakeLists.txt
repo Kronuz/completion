@@ -24,13 +24,16 @@ endif()
 add_library(completion::asio ALIAS completion_asio)
 
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  # Standalone demo: a durable batch may contain files from separate devices.
+  add_executable(completion_demo examples/demo.cc)
+  target_link_libraries(completion_demo PRIVATE completion::completion)
   include(CTest)
   if(BUILD_TESTING)
     foreach(t core allocation resource posix_resource scan inspection cursor_close reuse image_close create_into sync_files map)
       add_executable(completion_${t}_test test/${t}_test.cc)
       target_link_libraries(completion_${t}_test PRIVATE completion::completion)
     endforeach()
-    # Tests that work on files take a state directory.
+    # File tests take a state directory; sync_files also models independent device caches.
     foreach(t allocation resource)
       add_test(NAME completion_${t} COMMAND completion_${t}_test)
     endforeach()
