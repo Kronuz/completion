@@ -1,0 +1,94 @@
+# Architecture
+
+`completion` is a protocol-independent, header-only C++20 I/O module: trusted-directory POSIX file operations, owned primitive requests with authentic results, and native completion queues: io_uring on Linux, and POSIX AIO on FreeBSD (kqueue notification) and macOS (polled), each with a bounded fallback worker for operations the kernel cannot run asynchronously. Measurements and qualification records are in [docs/MEASUREMENTS.md](docs/MEASUREMENTS.md); [docs/PLATFORM_FINDINGS.md](docs/PLATFORM_FINDINGS.md) records what durability costs on each platform.
+
+## The contract
+
+New consumers include `completion/api.h` and use `kronuz::io::completion`. Link `completion::completion`, or `completion::asio` for the Asio adapter; the I/O types keep the `kronuz::journal` namespace they had when this module was part of the journal.
+
+An operation owns every filename, buffer and file lease referenced by its request. Once a driver accepts a request, it retains that operation until the original primitive completes. Cancellation cannot fabricate a result, release accepted buffers, or refund outstanding admission. The owner consumes the typed result before deciding whether an obsolete consumer still needs a continuation. A failed driver with outstanding accepted work cannot safely pretend that work completed.
+
+`drive_synchronously()` executes the same primitives for synchronous callers and dedicated workers. Event-loop owners use native completion queues or the optional `completion::asio` adapter from `completion/asio_completion.h`; the host supplies standalone Asio. Opening the trusted directory and acquiring its stable owner lock are startup operations, not asynchronous job submissions.
+
+The POSIX backend requires a caller-created, exclusively owned directory with trusted ancestors. It rejects unsafe basenames, final-component symlinks, foreign-owned or multiply linked files, and group/world-writable entries. Creation remains exclusive and defaults to mode `0600`; an additive constructor argument allows `0640` or `0644` for shared artifacts. The selected permissions are applied before successful creation completes, independently of umask; `owner.lock` always remains `0600`. File synchronization and directory synchronization are separate primitives: replacing a filename does not by itself establish a durable publication.
+
+## Batched file synchronization
+
+`IO::sync_files(std::span<File* const>)` makes every supplied file durable, including files from different backends or devices. `PosixIO` calls each foreign backend's `File::sync()`. On macOS it calls `fsync` on every POSIX file, then `F_FULLFSYNC` once per distinct `st_dev`; Linux starts writeback before calling `fsync` on every file, and other POSIX platforms call `fsync` on every file. An empty batch does nothing. A failed batch leaves which files are durable unspecified.
+
+Keep every file alive and open until the call returns, and take a separate directory barrier for new or replaced names. [examples/demo.cc](examples/demo.cc) creates `batch-example` in each of two empty, caller-owned directories, which may reside on different devices:
+
+```sh
+cmake --build build --target completion_demo
+build/completion_demo /path/to/first-private-directory /path/to/second-private-directory
+```
+
+## Mapping whole files
+
+`File::map()` returns a read-only view of the whole file as it was when mapped, as a
+`std::shared_ptr<const Mapping>` whose `bytes()` stay valid while the handle lives,
+even after the file is unlinked or replaced. The default returns null, so callers
+fall back to reading; `PosixIO` maps with `mmap`. Writes through other handles are
+not promised to show. strata serves its immutable segments this way.
+
+## Opaque image jobs
+
+`make_posix_io(context, directory, mode)` admits the backend's outer shared control. Its context-first constructor admits concrete file, directory cursor and owner-lock controls before opening their native handles. These controls preserve the existing `unique_ptr<File>`, `unique_ptr<DirectoryCursor>` and `unique_ptr<OwnerLock>` types; private allocation headers retain the PMR owner through default virtual deletion, including constructor failure. Files and cursors can outlive the backend; the existing owner-lock requirement to retain its backend still applies. POSIX syscall names use bounded inline NUL-terminated storage. The legacy `DirectoryCursor::next()` return string and libc's directory buffer remain outside this accounting; managed inventory uses the opt-in caller-buffer interface described below.
+
+`make_native_queue(context, ...)` admits the outer queue/control allocation. Linux namespace names use 129-byte inline buffers after validation, and ring capability probing uses a fixed inline buffer. Each queue still has one original and one result slot; callers independently bound the number of queues. Thread runtime/stack storage, kernel descriptors/ring mappings, libc allocations, exception runtime and optional Asio handlers/coroutines remain separately reported baselines. Admitting the queue object does not admit those resources.
+
+`completion/allocation.h` supplies an optional `AllocationContext` and `OwnedAllocator<T>` without application dependencies. Empty contexts use the process-lifetime `new_delete_resource()`; managed contexts retain their resource across container rebinds and weak shared controls. Allocation sizes are checked before calling the resource, and deallocation is nonthrowing. AllocationContext alone does not charge legacy objects; consumers opt in through context-first constructors and factories described below.
+
+`completion/image.h` provides `ImagePreparation` and `ImagePublication` over the same operation interface. Preparation retains an immutable input buffer, backend and caller-supplied owner/admission lease; writes use at most 64 KiB per primitive and handle short writes. Only completed file and directory synchronization can produce a `PreparedImage` capability. The caller supplies a unique generation basename and validates application semantics before preparation.
+
+Publication takes a prepared descriptor whose opaque bytes identify the separately prepared image. The application checks its expected base before constructing the job and retains the referenced image through its supplied lease. Descriptor replacement is followed by directory synchronization. Once replacement is submitted, an error leaves an uncertain outcome; the application must preserve both possible roots and fence further publication until recovery determines the selected descriptor. Successful publication consumes the prepared descriptor's selection capability. These jobs do not interpret cursors, choose storage quotas, reclaim files, or provide a transactional rollback.
+
+Preparation also accepts a separate immutable byte view and opaque lifetime owner. This allows charged arenas and buffer slices without copying through an owning `std::string`; the existing string constructor is preserved. The caller must supply the matching view and keep its bytes immutable. The accepted operation retains the owner through its original write and sealing chain, releasing it after the final successful directory barrier. Failed operations retain it until operation disposal. The standalone test drops the initiating facade after a write is accepted by `NativeQueue` and checks both slice contents and owner retention through sealing.
+
+Prepared image state now owns its File uniquely. Request file handles alias that admitted state, so accepting a successful Create completion does not allocate another shared control block. Such a file handle retains the state’s backend and admission lease after the initiating facade disappears. Public request/completion file types and constructors are unchanged; header consumers rebuild together.
+
+Context-first image constructors accept borrowed names and retain owned allocators for long-name storage. `make_image_preparation()` admits the outer shared job as well as its nested state and name; `make_image_publication()` inherits the prepared state's context and admits its outer job and destination name. Direct construction accounts nested storage only. Legacy constructors still transfer the caller's existing string allocation. A failed publication allocation does not consume the prepared state's selection capability.
+
+The fixture additionally refuses every subsequent PMR allocation once preparation is constructed, including while Create is pending. File adoption and the remaining sealing chain still complete without another resource call. Detent's common-ledger fixture separately exhausts its quota after the managed backend produces a successful Create result but before result consumption; adoption advances to Write with the quota still full. Both checks pass on macOS, Linux and FreeBSD and under macOS ASan/UBSan.
+
+## Caller-buffer directory scanning
+
+`DirectoryCursor::next_into(span<char>)` and the appended `NextInto` primitive write a basename into operation-owned scratch without constructing a result string. A positive result count is the number of bytes, without a NUL terminator; zero means EOF. POSIX scanning accepts a 255-byte basename. An undersized buffer produces an error after consuming that entry, so a managed census must fence rather than retry the same cursor. Backends that only implement legacy `next()` explicitly reject this operation instead of allocating through that path.
+
+Both native drivers route the primitive through their bounded fallback executor. Legacy primitive ordinals and the two 12-element statistics arrays remain unchanged; additive counts appear in separate extension arrays. Request/completion layouts and legacy scan APIs remain unchanged. Header consumers must rebuild together.
+
+## Managed metadata, leases and handle settlement
+
+`IO::managed_capabilities()` reports caller-buffer scanning, no-follow entry inspection, held-file inspection, nonblocking file leases and explicit close. All new hooks default to unsupported. A managed consumer must require the complete profile before admission; capability reporting does not replace validation of each returned observation. POSIX implements the profile, preserving the existing footprint and unique-return interfaces.
+
+`EntryInspection` reports kind, logical/allocated bytes, device/inode, owner, link count and permission bits. `InspectEntry` returns optional absence without following symlinks; `InspectFile` reports the held inode. `SharedLease` and `ExclusiveLease` return count one for acquisition and zero for busy. POSIX refuses conversion after an acquired lease, so reclamation uses a separately opened fresh handle. `CloseFile` closes through the existing worker-side completion path, after the consumer has settled every preceding original referencing that handle. Retaining the file control alone does not serialize different queues. Close errors remain authentic errors and cannot justify a cleanup refund; close is never retried against a potentially reused descriptor.
+
+These appended primitives use bounded fallback execution on both native drivers. Legacy primitive ordinals and twelve-element statistics arrays are preserved; extension counters grow to six. Result metadata and virtual hooks are additive source changes, so consumers must rebuild against matching headers. Journal formats and wire encodings remain unchanged.
+
+## Coroutine extension dispatch
+
+The optional `AsioCompletionDriver` accepts the same supported primitive set as native queues. Its original twelve-element latency arrays and `completion_primitive_count` remain unchanged; separate extension arrays expose success/error latency snapshots for appended kinds. An unsupported kind fails before submission, with driver availability restored.
+
+## Explicit directory-cursor settlement
+
+`DirectoryCursor::close()` and appended `CloseCursor` consume the native cursor on the completion worker. The default hook rejects unsupported backends; managed capabilities additionally require `cursor_close`. POSIX consumes its `DIR*` before calling `closedir`, never retries an error, rejects subsequent scan/close operations and leaves later wrapper destruction inert. Applications must settle every preceding cursor original before submitting close and consume its authentic result before declaring census complete.
+
+Relative to `6c0130d`, Intel macOS statistics grow from 368 to 384 bytes and `NativeQueue` from 832 to 848 bytes; `PosixFile` remains 16 bytes and result storage 184 bytes. Optional coroutine metrics and snapshots each grow from 5,328 to 5,616 bytes for the seventh extension histogram. The twelve legacy counters and latency arrays remain unchanged. These measurements establish admitted object capacity, not process RSS or execution-time improvements. Session final teardown and application inventory readiness remain separate lifecycle obligations.
+
+## Preadmitted reusable collector controls
+
+The opt-in reusable profile adds `make_closed_file` and `make_closed_cursor` factories, plus `open_existing_into`, `open_reclaim_candidate_into` and `scan_directory_into`. Defaults reject unsupported backends. Managed capabilities additionally require `reusable_controls`. Applications admit actual concrete controls during startup, retain them while native handles are closed, and serialize reuse only after authentic close settlement and release of preceding original references. The same backend retains its stable owner lock and directory-barrier behavior.
+
+POSIX destinations are tagged with a process-local monotonically increasing backend identity. A control can outlive its backend, so its originating address alone would be insufficient when a later backend occupies that address. Into calls reject live, incompatible and wrong-backend controls before native IO; they never overwrite a live handle or allocate another managed control. Failed opens close temporary native descriptors on the executing worker and leave the destination closed. Candidate absence/unsafe metadata returns false. The appended `OpenInto`, `OpenCandidateInto` and `ScanInto` primitives reuse existing request aliases; candidate presence is result count zero or one.
+
+## Managed image-preparation file settlement
+
+Existing preparation constructors, including context-taking constructors, retain their file as before. A typed `PreparationFilePolicy::CloseAfterSeal` overload opts into Create, bounded writes, FileSync, DirectorySync and CloseFile before a prepared capability becomes available. It requires explicit-close capability before Create and reserves token space for worst-case one-byte writes and final cleanup. The opaque capability keeps its name, backend, admission and closed control; publication still uses only Replace and DirectorySync.
+
+An authentic Create result's file is adopted before handling an accompanying error. Earlier failures with a file continue through worker close; the first error is preserved and `cleanup_error()` separately exposes a close failure. `original_error()` preserves actual original IO errors even when cancellation was already requested. Close errors never trigger a second close and cannot yield a prepared capability. Managed `cancel()` stops further ordinary work after accepted original settlement and drains close; it returns false for completed or retained-file-policy jobs. Hosts must retain and drive the whole operation through cleanup after facade retirement, as with the existing original-settlement contract.
+
+## Preadmitted exclusive creation
+
+`CreateInto` creates a new exclusive file using a fresh closed control supplied by the caller. The separate `reusable_create` capability defaults to unsupported; the existing seven-capability collector `complete()` predicate remains unchanged. POSIX rejects live and wrong-backend controls before native creation. A failed call leaves a valid closed destination closed, but may leave a namespace artifact, so applications retain conservative disk debt.
+
+Context-taking image preparation overloads accept that closed control and use `CloseAfterSeal`. The control, payload and operation state are admitted before Create. Cancellation after an accepted Create consumes its authentic result and closes the handle on the worker before termination. Existing constructors and retained-file behavior remain unchanged. Hosts must supply a fresh control from the same backend and retain the whole operation through cleanup.

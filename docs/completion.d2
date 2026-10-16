@@ -1,0 +1,28 @@
+# completion: owned operations, one primitive at a time, run on the backend the host picks.
+# Render: d2 --layout elk --sketch --theme 302 docs/completion.d2 docs/completion.svg
+direction: right
+
+op: owned operation {
+  label: "operation\nowns names, buffers, file leases"
+}
+prim: primitive {
+  label: "one primitive at a time\nwrite · sync · create · replace · read · scan …"
+}
+drivers: drivers {
+  sync: "drive_synchronously()\n(caller or worker thread)"
+  linux: "Linux: io_uring"
+  bsd: "FreeBSD / macOS: POSIX AIO"
+  asio: "completion::asio\n(coroutine adapter)"
+}
+result: authentic result {
+  label: "the original's result\nnever fabricated"
+}
+op -> prim
+prim -> drivers.sync
+prim -> drivers.linux
+prim -> drivers.bsd
+prim -> drivers.asio
+drivers.sync -> result
+drivers.linux -> result
+drivers.bsd -> result
+drivers.asio -> result
