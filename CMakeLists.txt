@@ -4,7 +4,7 @@ project(completion LANGUAGES CXX)
 # Completion-based file I/O: native backends (io_uring on Linux, kqueue on BSD and macOS,
 # a thread pool elsewhere), image publication, and directory scans. Header-only.
 include(FetchContent)
-FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG 9d7e724d596eb70cc3122672c7efec3d7f570f35)
+FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG c975765bafe61fa79a0aa417be6deb30edf3b1db)
 FetchContent_MakeAvailable(metrics)
 
 find_package(Threads REQUIRED)
