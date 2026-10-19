@@ -70,8 +70,10 @@ int main() {
 ```
 
 `io.acquire_directory_owner()` takes the same exclusive lock on the directory handle
-itself, with no lock file, and refuses a filesystem it cannot prove local (NFS, SMB,
-FUSE, and the like) with `std::errc::not_supported`.
+itself, with no lock file, on any filesystem. `io.directory_filesystem()` reports whether
+the filesystem is known local (`local`, plus its `name`), so a host can warn before it
+relies on the lock over NFS, SMB, or the like; a filesystem whose `flock` is unsupported
+fails with `std::errc::not_supported`, and the host decides whether to run unlocked.
 
 [`examples/demo.cc`](examples/demo.cc) makes files in two directories durable with
 one `sync_files` call.
