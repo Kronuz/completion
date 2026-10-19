@@ -21,7 +21,9 @@ write. The storage layer under [journal](https://github.com/Kronuz/journal) and
 - **One state machine, four drivers.** The same primitives run synchronously, on
   io_uring, on POSIX AIO, or through the `completion::asio` adapter.
 - **A hardened directory backend.** `PosixIO` rejects symlinks, hard links,
-  foreign-owned and world-writable files, and unsafe names; creation is exclusive.
+  foreign-owned and world-writable files, and unsafe names; creation is exclusive. The
+  root itself is trusted by default only when it is owned and private; two options let a
+  host proceed and warn instead.
 - **Durability done right.** `F_FULLFSYNC` on macOS, batched `sync_files` across
   devices, and separate file and directory barriers.
 - **Zero-copy reads.** `File::map()` gives a read-only view of a whole file.
@@ -74,6 +76,16 @@ itself, with no lock file, on any filesystem. `io.directory_filesystem()` report
 the filesystem is known local (`local`, plus its `name`), so a host can warn before it
 relies on the lock over NFS, SMB, or the like; a filesystem whose `flock` is unsupported
 fails with `std::errc::not_supported`, and the host decides whether to run unlocked.
+
+By default `PosixIO` refuses a root that is a symlink, is owned by another user, or is
+writable by group or others. `PosixIOOptions` relaxes that, for a host that would rather warn:
+`PosixIO io(dir, 0600, {.follow_root_symlink = true, .allow_shared_directory = true})`
+opens through a final symlink (the descriptor is then held, so a later retarget moves
+nothing) and admits a foreign owner or a shared-writable mode. Either way
+`io.directory_trust()` reports what was found (`symlinked_root`, `foreign_owner`,
+`shared_writable`; `trusted()` is true when neither of the last two is set). An IO that
+does not inspect its directory reports `known == false`, which is not trusted. Entries
+inside the directory stay no-follow under every option.
 
 [`examples/demo.cc`](examples/demo.cc) makes files in two directories durable with
 one `sync_files` call.

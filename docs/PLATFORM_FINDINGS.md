@@ -157,3 +157,22 @@ barrier. Call `directory_filesystem()` and warn when it is not `local`: there th
 fail or exclude only local holders. A host that needs real exclusion on a network
 filesystem needs its own above the library (one process owning the whole root); do not
 fall back to a lock file.
+
+## 8. A symlinked root, and how its refusal shows
+
+strata's data volumes are commonly symlinks, and `PosixIO` refused a symlinked root. The
+owner's rule is to warn, not babysit, so `PosixIOOptions::follow_root_symlink` opens
+through a final symlink and `allow_shared_directory` admits a foreign owner or a
+group/other-writable mode; the defaults refuse as before (Detent links this library).
+
+- `open(O_DIRECTORY | O_NOFOLLOW)` on a symlink to a directory fails with `ENOTDIR` on
+  macOS 15 (probed), not `ELOOP`: `O_DIRECTORY` is checked before the symlink. Linux checks
+  in the same order and FreeBSD reports `EMLINK` for `O_NOFOLLOW`, so the constructor
+  treats `ELOOP`, `EMLINK`, and `ENOTDIR` as "maybe a symlink" and confirms with `lstat`
+  before reopening through it. A symlink to a file, a dangling one, and a loop still fail.
+- The flags describe the descriptor that is held (`fstat` of it), so a symlink retargeted
+  afterwards moves nothing. Whether the root was a symlink is the one fact read from the
+  path; it is informational.
+
+**For a consumer:** construct the `PosixIO` with both options, read `directory_trust()`,
+and warn on `foreign_owner` or `shared_writable`; a symlinked root alone needs no warning.

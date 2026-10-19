@@ -120,12 +120,27 @@ struct FilesystemClass {
 	bool operator==(const FilesystemClass&) const = default;
 };
 
+// What the directory's root was found to be, so a caller can warn without the IO refusing.
+// `known` is false for an IO that does not inspect its directory; the flags are then unset
+// and say nothing, so a caller that wants a trusted directory checks trusted().
+struct DirectoryTrust {
+	bool known = false;
+	bool symlinked_root = false;   // the final component was a symlink, followed to the directory
+	bool foreign_owner = false;    // not owned by the effective uid
+	bool shared_writable = false;  // writable by group or others
+	bool trusted() const noexcept { return known && !foreign_owner && !shared_writable; }
+	bool operator==(const DirectoryTrust&) const = default;
+};
+
 class IO {
 public:
 	virtual ~IO() = default;
 	// The directory's filesystem. An IO that does not classify reports it unclassified, not
 	// local, so a caller that refuses non-local filesystems refuses it. A wrapper forwards.
 	virtual FilesystemClass directory_filesystem() const { return {false, "unclassified"}; }
+	// What the directory's root was found to be. An IO that does not inspect it reports it
+	// unknown, so a caller that refuses untrusted directories refuses it. A wrapper forwards.
+	virtual DirectoryTrust directory_trust() const { return {}; }
 	virtual ManagedCapabilities managed_capabilities() const noexcept { return {}; }
 	// Creation is exclusive. Recovery opens the existing stable lock; neither
 	// manifest replacement nor fencing releases or replaces this lock.
