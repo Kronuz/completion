@@ -131,7 +131,7 @@ void warnings(const fs::path& directory) {
 	io.replace_statfs(inject);
 	const Injection foreign[] = {
 		{"nfs", 0x6969, false, "nfs"},
-		{"smb", 0xFE534D42, false, "smbfs"},
+		{"smb2", 0xFE534D42, false, "smbfs"},
 		{"fuse", 0x65735546, false, "fusefs"},
 		{"9p", 0x01021997, false, "p9fs"},
 		{"unknown", 0x0BADF00D, false, "weirdfs"},
