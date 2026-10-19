@@ -365,25 +365,45 @@ private:
 };
 } // namespace detail
 
+// How strictly PosixIO trusts the directory it is given. The defaults refuse; either option
+// admits what it names and PosixIO::directory_trust() reports what was found.
+struct PosixIOOptions {
+	bool follow_root_symlink = false;     // open through a final-component symlink; the descriptor is then held
+	bool allow_shared_directory = false;  // admit a foreign owner and group/other-writable mode
+};
+
 class PosixIO final : public IO {
 public:
 	// The application establishes and durably publishes this directory first.
-	// Trusted ancestors are a caller precondition; final-component symlinks and
-	// directories writable by other users are rejected here.
-	explicit PosixIO(const std::filesystem::path& directory, unsigned artifact_mode = 0600)
-		: PosixIO(kronuz::io::completion::AllocationContext{}, directory, artifact_mode) {}
+	// Trusted ancestors are a caller precondition. By default a final-component
+	// symlink, a foreign owner, and a group/other-writable mode are rejected here;
+	// `options` admits them (see directory_trust to warn). Entries stay no-follow.
+	explicit PosixIO(const std::filesystem::path& directory, unsigned artifact_mode = 0600, PosixIOOptions options = {})
+		: PosixIO(kronuz::io::completion::AllocationContext{}, directory, artifact_mode, options) {}
 	PosixIO(kronuz::io::completion::AllocationContext context, const std::filesystem::path& directory,
-		unsigned artifact_mode = 0600)
+		unsigned artifact_mode = 0600, PosixIOOptions options = {})
 		: context_(std::move(context)), artifact_mode_(artifact_mode) {
 		if (artifact_mode != 0600 && artifact_mode != 0640 && artifact_mode != 0644) {
 			throw std::invalid_argument("unsupported artifact permissions");
 		}
-		directory_ = ::open(directory.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+		constexpr int flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
+		directory_ = ::open(directory.c_str(), flags | O_NOFOLLOW);
+		// A final symlink fails O_NOFOLLOW with ELOOP, EMLINK (FreeBSD), or ENOTDIR (O_DIRECTORY).
+		if (directory_ < 0 && options.follow_root_symlink && (errno == ELOOP || errno == EMLINK || errno == ENOTDIR)) {
+			struct stat link{};
+			if (!::lstat(directory.c_str(), &link) && S_ISLNK(link.st_mode)) {
+				trust_.symlinked_root = true;
+				directory_ = ::open(directory.c_str(), flags);
+			}
+		}
 		if (directory_ < 0) { detail::system_failure("open journal directory"); }
 		try {
 			struct stat status{};
 			if (::fstat(directory_, &status)) { detail::system_failure("stat journal directory"); }
-			if (!S_ISDIR(status.st_mode) || status.st_uid != ::geteuid() || (status.st_mode & 0022)) {
+			trust_.known = true;
+			trust_.foreign_owner = status.st_uid != ::geteuid();
+			trust_.shared_writable = (status.st_mode & 0022) != 0;
+			if (!S_ISDIR(status.st_mode) || ((trust_.foreign_owner || trust_.shared_writable) && !options.allow_shared_directory)) {
 				throw std::runtime_error("journal directory requires exclusive ownership");
 			}
 			device_ = status.st_dev;
@@ -430,6 +450,8 @@ public:
 		directory_locked_ = true;
 		return owner;
 	}
+	// What the root was found to be at construction, for a caller to warn on.
+	DirectoryTrust directory_trust() const override { return trust_; }
 	// The directory's filesystem, so a caller can warn when it is not known local.
 	FilesystemClass directory_filesystem() const override {
 #ifdef KRONUZ_COMPLETION_STATFS
@@ -631,6 +653,7 @@ private:
 	kronuz::io::completion::AllocationContext context_;
 	int directory_ = -1, owner_fd_ = -1;
 	bool directory_locked_ = false;
+	DirectoryTrust trust_;
 	FlockCall flock_ = &::flock;
 #ifdef KRONUZ_COMPLETION_STATFS
 	StatfsCall statfs_ = nullptr;
