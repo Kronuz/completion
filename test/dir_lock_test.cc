@@ -178,6 +178,27 @@ void warnings(const fs::path& directory) {
 }
 #endif
 
+// An IO that does not classify reports itself unclassified and not local; PosixIO's answer
+// is reached through the base, so a wrapper that forwards it classifies.
+struct UnclassifiedIO final : j::IO {
+	std::unique_ptr<j::OwnerLock> acquire_owner(bool) override { throw std::logic_error("unused"); }
+	std::unique_ptr<j::File> open_existing(std::string_view) override { throw std::logic_error("unused"); }
+	std::unique_ptr<j::File> create_exclusive(std::string_view) override { throw std::logic_error("unused"); }
+	void replace(std::string_view, std::string_view) override { throw std::logic_error("unused"); }
+	void remove(std::string_view) override { throw std::logic_error("unused"); }
+	void sync_directory() override { throw std::logic_error("unused"); }
+};
+
+void base_classification(const fs::path& directory) {
+	UnclassifiedIO none;
+	const j::IO& base = none;
+	check(!base.directory_filesystem().local, "an IO that does not classify is not local");
+	check(base.directory_filesystem().name == "unclassified", "and says so");
+	j::PosixIO posix(directory);
+	const j::IO& through_base = posix;
+	check(through_base.directory_filesystem() == posix.directory_filesystem(), "PosixIO answers through the base");
+}
+
 int enotsup_flock(int, int) {
 	errno = ENOTSUP;
 	return -1;
@@ -349,6 +370,7 @@ int main(int argc, char** argv) {
 	}
 	const fs::path directory(argv[1]);
 	classifier();
+	base_classification(fresh(directory));
 #ifdef KRONUZ_COMPLETION_STATFS
 	warnings(directory);
 #endif
