@@ -28,6 +28,8 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fcntl.h>
 #include <dirent.h>
@@ -38,11 +40,27 @@
 #include <sys/file.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#if defined(__linux__)
+#include <sys/vfs.h>
+#define KRONUZ_COMPLETION_STATFS 1
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__DragonFly__)
+#include <sys/param.h>
+#include <sys/mount.h>
+#define KRONUZ_COMPLETION_STATFS 1
+#define KRONUZ_COMPLETION_MOUNT_STATFS 1
+#endif
 #include <unistd.h>
 #include <utility>
 #include <vector>
 
 namespace kronuz::journal {
+
+// A directory's filesystem as the directory owner lock judges it.
+struct FilesystemClass {
+	bool local = false;  // known local, so a directory flock excludes every other holder
+	std::string name;
+	bool operator==(const FilesystemClass&) const = default;
+};
 
 namespace detail {
 // Concrete POSIX controls keep default unique_ptr deletion. Their allocation
@@ -184,6 +202,47 @@ inline void files_sync(std::span<const int> fds) {
 	for (int fd : fds) { file_sync(fd); }
 #endif
 }
+// Linux f_type: an allow-list of local filesystems; the refusals listed are only named.
+inline FilesystemClass linux_filesystem(std::uint32_t magic) {
+	struct Known { std::uint32_t magic; const char* name; bool local; };
+	static constexpr Known known[] = {
+		{0xEF53, "ext2/ext3/ext4", true}, {0x58465342, "xfs", true}, {0x9123683E, "btrfs", true},
+		{0x01021994, "tmpfs", true}, {0xF2F52010, "f2fs", true}, {0x2FC12FC1, "zfs", true},
+		{0xCA451A4E, "bcachefs", true}, {0x794C7630, "overlayfs", true},
+		{0x6969, "nfs", false}, {0x517B, "smb", false}, {0xFF534D42, "cifs", false},
+		{0xFE534D42, "smb2", false}, {0x65735546, "fuse", false}, {0x01021997, "9p", false},
+		{0x00C36400, "ceph", false}, {0x5346414F, "afs", false}, {0x6B414653, "kafs", false},
+		{0x01161970, "gfs2", false}, {0x7461636F, "ocfs2", false}, {0x0BD00BD0, "lustre", false},
+		{0x858458F6, "ramfs", false}, {0x4D44, "vfat", false}, {0x2011BAB0, "exfat", false},
+		{0x5346544E, "ntfs", false}, {0xF15F, "ecryptfs", false}, {0x73717368, "squashfs", false},
+	};
+	for (const auto& type : known) {
+		if (type.magic == magic) { return {type.local, type.name}; }
+	}
+	char hex[16];
+	std::snprintf(hex, sizeof hex, "0x%X", static_cast<unsigned>(magic));
+	return {false, std::string("unknown type ") + hex};
+}
+// macOS and the BSDs: the kernel's MNT_LOCAL, except FUSE, where "local" is the daemon's claim.
+inline FilesystemClass mount_filesystem(bool mnt_local, std::string_view type) {
+	const bool fuse = type.starts_with("fuse") || type.starts_with("macfuse") || type.starts_with("osxfuse");
+	return {mnt_local && !fuse, type.empty() ? std::string("unnamed type") : std::string(type)};
+}
+} // namespace detail
+
+#if defined(__linux__)
+inline FilesystemClass classify_filesystem(const struct statfs& status) {
+	return detail::linux_filesystem(static_cast<std::uint32_t>(status.f_type));
+}
+#elif defined(KRONUZ_COMPLETION_MOUNT_STATFS)
+inline FilesystemClass classify_filesystem(const struct statfs& status) {
+	const auto* name = status.f_fstypename;
+	return detail::mount_filesystem((status.f_flags & MNT_LOCAL) != 0,
+		std::string_view(name, ::strnlen(name, sizeof status.f_fstypename)));
+}
+#endif
+
+namespace detail {
 inline off_t checked_offset(std::uint64_t offset) {
 	if (offset > static_cast<std::uint64_t>(std::numeric_limits<off_t>::max())) {
 		throw std::length_error("journal offset exceeds platform range");
@@ -357,6 +416,29 @@ public:
 			return owner;
 		} catch (...) { ::close(fd); throw; }
 	}
+	// Locks this IO's directory handle, exclusive and nonblocking, while the returned lock
+	// lives. Writes nothing. A filesystem not known local refuses with errc::not_supported;
+	// busy is EWOULDBLOCK, as acquire_owner reports it. Destroy the lock before the IO.
+	std::unique_ptr<OwnerLock> acquire_directory_owner() override {
+		if (directory_locked_) { throw std::logic_error("journal directory already locked"); }
+		const auto filesystem = directory_filesystem();
+		if (!filesystem.local) { refuse_filesystem(filesystem.name, "is not a known-local filesystem"); }
+		auto owner = control<DirectoryLock>(*this);
+		int result;
+		do { result = ::flock(directory_, LOCK_EX | LOCK_NB); } while (result < 0 && errno == EINTR);
+		if (result < 0) {
+			if (errno == EOPNOTSUPP || errno == ENOTSUP) { refuse_filesystem(filesystem.name, "does not lock directories"); }
+			detail::system_failure("lock journal directory");
+		}
+		owner->install();
+		directory_locked_ = true;
+		return owner;
+	}
+#ifdef KRONUZ_COMPLETION_STATFS
+	using StatfsCall = int (*)(int fd, struct statfs* result);
+	// A test seam: the filesystem answer acquire_directory_owner classifies; null is fstatfs.
+	void replace_statfs(StatfsCall call) noexcept { statfs_ = call; }
+#endif
 	std::unique_ptr<File> make_closed_file() override { return control<ReusableFile>(*this); }
 	void create_exclusive_into(std::string_view name, File& destination) override {
 		auto &target = file_destination(destination);
@@ -445,10 +527,10 @@ public:
 		do { result = ::fsync(directory_); } while (result < 0 && errno == EINTR);
 		if (result < 0) { detail::system_failure("sync journal directory"); }
 #ifdef __APPLE__
-		// Directory fsync establishes namespace ordering; fullsync then asks the
-		// storage device to flush its cache. Unsupported barriers fail closed.
-		if (owner_fd_ < 0) { throw std::logic_error("directory barrier requires owner lock"); }
-		detail::file_sync(owner_fd_);
+		// Directory fsync establishes namespace ordering; fullsync then asks the storage
+		// device to flush its cache, through the owner file when held, else the directory.
+		// Unsupported barriers fail closed.
+		detail::file_sync(owner_fd_ >= 0 ? owner_fd_ : directory_);
 #endif
 	}
 
@@ -486,6 +568,33 @@ private:
 		PosixIO& io_;
 		int fd_;
 	};
+	class DirectoryLock : public OwnerLock {
+	public:
+		explicit DirectoryLock(PosixIO& io) : io_(io) {}
+		~DirectoryLock() override {
+			if (held_) { io_.directory_locked_ = false; (void)::flock(io_.directory_, LOCK_UN); }
+		}
+		void install() noexcept { held_ = true; }
+	private:
+		PosixIO& io_;
+		bool held_ = false;
+	};
+	FilesystemClass directory_filesystem() const {
+#ifdef KRONUZ_COMPLETION_STATFS
+		struct statfs status{};
+		int result;
+		do { result = statfs_ ? statfs_(directory_, &status) : ::fstatfs(directory_, &status); }
+		while (result < 0 && errno == EINTR);
+		if (result < 0) { detail::system_failure("inspect journal directory filesystem"); }
+		return classify_filesystem(status);
+#else
+		return {false, "a filesystem this platform cannot classify"};
+#endif
+	}
+	[[noreturn]] static void refuse_filesystem(const std::string& name, const char* reason) {
+		throw std::system_error(std::make_error_code(std::errc::not_supported),
+			"directory owner lock refuses " + name + ", which " + reason);
+	}
 	int open_file(std::string_view name, bool create) {
 		detail::PosixName component(name);
 		int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
@@ -525,6 +634,10 @@ private:
 	const std::uint64_t instance_ = detail::next_posix_instance();
 	kronuz::io::completion::AllocationContext context_;
 	int directory_ = -1, owner_fd_ = -1;
+	bool directory_locked_ = false;
+#ifdef KRONUZ_COMPLETION_STATFS
+	StatfsCall statfs_ = nullptr;
+#endif
 	dev_t device_{};
 	unsigned artifact_mode_ = 0600;
 };
