@@ -5,13 +5,15 @@ project(completion LANGUAGES CXX)
 # a thread pool elsewhere), image publication, and directory scans. Header-only.
 include(FetchContent)
 FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG c975765bafe61fa79a0aa417be6deb30edf3b1db)
-FetchContent_MakeAvailable(metrics)
+# Shared owning PMR allocation contexts, without global allocation overrides.
+FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG b7daa52f1b6a316e04bba2817f0f527d64d704eb)
+FetchContent_MakeAvailable(metrics allocators)
 
 find_package(Threads REQUIRED)
 add_library(completion INTERFACE)
 target_include_directories(completion INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_compile_features(completion INTERFACE cxx_std_20)
-target_link_libraries(completion INTERFACE Threads::Threads metrics::metrics)
+target_link_libraries(completion INTERFACE Threads::Threads metrics::metrics allocators::resources)
 add_library(completion::completion ALIAS completion)
 
 # Optional Asio adapter; the host supplies standalone Asio. No fetch here.
