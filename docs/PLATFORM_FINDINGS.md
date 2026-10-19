@@ -122,3 +122,33 @@ and `pthread_mutex_lock`/`unlock`.
 a replay, a benchmark driver) pays this per character. Read the file descriptor in large
 blocks instead; `read(2)` returns what is available, so an interactive peer still gets
 its answer.
+
+## 7. An owner lock on the directory handle, refused off local filesystems
+
+strata's small-indexes review (`docs/reviews/small-indexes-design.md`, SI-R2 and SI-R18)
+probed a directory `flock` and a directory-descriptor `F_FULLFSYNC` on macOS 15 x86_64:
+
+- `flock(LOCK_EX | LOCK_NB)` on an `O_RDONLY` directory descriptor excludes a second
+  description in one process and an unrelated process (`EWOULDBLOCK`) on APFS, HFS+, and
+  exFAT; the lock follows the inode across a rename and a `SIGKILL`ed holder releases it.
+  All three report `MNT_LOCAL`. ext4, tmpfs, and UFS rest on a designer's probe without
+  kept output; this library's `dir_lock` suite is the evidence there (CI on Linux ext4 and
+  tmpfs, FreeBSD, macOS APFS).
+- `F_FULLFSYNC` on a directory descriptor is a device flush: 20.5 ms p50 after a staged
+  write, against 20.4 ms on a regular file and 2 µs for `fsync(dir)`. No power cut has
+  tested it.
+- Over NFS, Linux emulates `flock` as a whole-file lock that needs the file open for
+  writing, or keeps it local under `local_lock`; over SMB it is a mandatory byte-range
+  lock (`flock(2)`). A directory cannot be opened for writing, so a directory lock there
+  either fails or excludes no other client, and the call cannot tell which.
+
+**In this library:** `IO::acquire_directory_owner()`, implemented by `PosixIO`, refuses a
+filesystem not known local before it locks (`std::errc::not_supported`, the type in the
+message): `MNT_LOCAL` and not FUSE on macOS and the BSDs, an `f_type` allow-list on
+Linux. On macOS `sync_directory` flushes through the directory descriptor when no
+`owner.lock` is held, where it used to throw `logic_error`. ZFS and overlayfs on Linux are
+allowed unprobed.
+
+**For a consumer:** one descriptor per open directory carries both the lock and the
+barrier. A host that must run on a network filesystem needs its own exclusion above the
+library (one process owning the whole root); do not fall back to a lock file.
