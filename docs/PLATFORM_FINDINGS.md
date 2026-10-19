@@ -166,10 +166,10 @@ through a final symlink and `allow_shared_directory` admits a foreign owner or a
 group/other-writable mode; the defaults refuse as before (Detent links this library).
 
 - `open(O_DIRECTORY | O_NOFOLLOW)` on a symlink to a directory fails with `ENOTDIR` on
-  macOS 15 (probed), not `ELOOP`: `O_DIRECTORY` is checked before the symlink. Linux checks
-  in the same order and FreeBSD reports `EMLINK` for `O_NOFOLLOW`, so the constructor
-  treats `ELOOP`, `EMLINK`, and `ENOTDIR` as "maybe a symlink" and confirms with `lstat`
-  before reopening through it. A symlink to a file, a dangling one, and a loop still fail.
+  macOS 15 (probed), not `ELOOP`: `O_DIRECTORY` is checked before the symlink. Other kernels
+  differ (`EMLINK` is FreeBSD's for `O_NOFOLLOW`), so the constructor treats `ELOOP`,
+  `EMLINK`, and `ENOTDIR` as "maybe a symlink" and confirms with `lstat` before reopening
+  through it; the suite runs on Linux and FreeBSD in CI. A symlink to a file, a dangling one, and a loop still fail.
 - The flags describe the descriptor that is held (`fstat` of it), so a symlink retargeted
   afterwards moves nothing. Whether the root was a symlink is the one fact read from the
   path; it is informational.
