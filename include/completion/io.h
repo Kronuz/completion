@@ -113,9 +113,19 @@ public:
 	virtual void close() { throw std::logic_error("explicit cursor close unsupported"); }
 };
 
+// A directory's filesystem as classified for the caller to warn on; the lock never refuses by it.
+struct FilesystemClass {
+	bool local = false;  // known local, so a directory flock is known to exclude every other holder
+	std::string name;
+	bool operator==(const FilesystemClass&) const = default;
+};
+
 class IO {
 public:
 	virtual ~IO() = default;
+	// The directory's filesystem. An IO that does not classify reports it unclassified, not
+	// local, so a caller that refuses non-local filesystems refuses it. A wrapper forwards.
+	virtual FilesystemClass directory_filesystem() const { return {false, "unclassified"}; }
 	virtual ManagedCapabilities managed_capabilities() const noexcept { return {}; }
 	// Creation is exclusive. Recovery opens the existing stable lock; neither
 	// manifest replacement nor fencing releases or replaces this lock.

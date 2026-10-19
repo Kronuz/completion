@@ -55,13 +55,6 @@
 
 namespace kronuz::journal {
 
-// A directory's filesystem as classified for the caller to warn on; the lock never refuses by it.
-struct FilesystemClass {
-	bool local = false;  // known local, so a directory flock is known to exclude every other holder
-	std::string name;
-	bool operator==(const FilesystemClass&) const = default;
-};
-
 namespace detail {
 // Concrete POSIX controls keep default unique_ptr deletion. Their allocation
 // header retains the PMR owner until after the most-derived destructor runs.
@@ -438,7 +431,7 @@ public:
 		return owner;
 	}
 	// The directory's filesystem, so a caller can warn when it is not known local.
-	FilesystemClass directory_filesystem() const {
+	FilesystemClass directory_filesystem() const override {
 #ifdef KRONUZ_COMPLETION_STATFS
 		struct statfs status{};
 		int result;
