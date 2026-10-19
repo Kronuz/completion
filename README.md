@@ -111,3 +111,9 @@ first. CI must pass on every platform.
 ## 📄 License
 
 MIT, Copyright (c) 2026 Germán Méndez Bravo. See [LICENSE](LICENSE).
+
+## Owning allocation contexts
+
+`completion::AllocationContext` and `completion::OwnedAllocator<T>` remain available through `completion/allocation.h` as aliases of the shared `allocators::resources` types. The resource lifetime and weak-control-block contract are unchanged. Completion links the header-only resource target, which neither builds nor links global allocation overrides or the optional cleanup runtime.
+
+The shared aliases preserve C++ source names, but their canonical type identities and some internal object layouts change. Rebuild C++ dependents together; do not mix precompiled objects from before and after this extraction. Persisted formats are unchanged by these allocation/accounting moves.
