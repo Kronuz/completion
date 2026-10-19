@@ -123,7 +123,7 @@ a replay, a benchmark driver) pays this per character. Read the file descriptor 
 blocks instead; `read(2)` returns what is available, so an interactive peer still gets
 its answer.
 
-## 7. An owner lock on the directory handle, refused off local filesystems
+## 7. An owner lock on the directory handle, warned on off local filesystems
 
 strata's small-indexes review (`docs/reviews/small-indexes-design.md`, SI-R2 and SI-R18)
 probed a directory `flock` and a directory-descriptor `F_FULLFSYNC` on macOS 15 x86_64:
@@ -142,13 +142,18 @@ probed a directory `flock` and a directory-descriptor `F_FULLFSYNC` on macOS 15 
   lock (`flock(2)`). A directory cannot be opened for writing, so a directory lock there
   either fails or excludes no other client, and the call cannot tell which.
 
-**In this library:** `IO::acquire_directory_owner()`, implemented by `PosixIO`, refuses a
-filesystem not known local before it locks (`std::errc::not_supported`, the type in the
-message): `MNT_LOCAL` and not FUSE on macOS and the BSDs, an `f_type` allow-list on
-Linux. On macOS `sync_directory` flushes through the directory descriptor when no
-`owner.lock` is held, where it used to throw `logic_error`. ZFS and overlayfs on Linux are
-allowed unprobed.
+**In this library:** `IO::acquire_directory_owner()`, implemented by `PosixIO`, locks on
+any filesystem: the owner's ruling is that a user who runs on a network filesystem
+gambles knowingly, so the library warns through the caller and does not refuse. A `flock`
+reported unsupported throws `std::errc::not_supported`. `PosixIO::directory_filesystem()`
+classifies the filesystem for that warning: `MNT_LOCAL` on macOS and the BSDs (FUSE
+included), an `f_type` allow-list on Linux (FUSE is non-local there). On macOS
+`sync_directory` flushes through the directory descriptor when no `owner.lock` is held,
+where it used to throw `logic_error`. ZFS and overlayfs on Linux are classed local
+unprobed.
 
 **For a consumer:** one descriptor per open directory carries both the lock and the
-barrier. A host that must run on a network filesystem needs its own exclusion above the
-library (one process owning the whole root); do not fall back to a lock file.
+barrier. Call `directory_filesystem()` and warn when it is not `local`: there the lock may
+fail or exclude only local holders. A host that needs real exclusion on a network
+filesystem needs its own above the library (one process owning the whole root); do not
+fall back to a lock file.

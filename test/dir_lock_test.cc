@@ -21,7 +21,8 @@
  */
 
 // The directory owner lock: busy pairs in one process and across processes write nothing,
-// filesystems not known local refuse, and the macOS barrier needs no owner file.
+// every filesystem locks and is classified for the caller to warn on, and the macOS barrier
+// needs no owner file.
 #include "completion/posix.h"
 #include <csignal>
 #include <filesystem>
@@ -88,17 +89,17 @@ void classifier() {
 	for (auto [magic, name] : std::initializer_list<std::pair<std::uint32_t, const char*>>{
 			{0x6969, "nfs"}, {0x517B, "smb"}, {0xFF534D42, "cifs"}, {0xFE534D42, "smb2"}, {0x65735546, "fuse"},
 			{0x01021997, "9p"}, {0x00C36400, "ceph"}, {0x858458F6, "ramfs"}}) {
-		check(j::detail::linux_filesystem(magic) == j::FilesystemClass{false, name}, "Linux named refusal");
+		check(j::detail::linux_filesystem(magic) == j::FilesystemClass{false, name}, "Linux named non-local");
 	}
 	check(j::detail::linux_filesystem(0x12345678) == j::FilesystemClass{false, "unknown type 0x12345678"},
-		"an unknown Linux type refuses, named by its magic");
+		"an unknown Linux type is non-local, named by its magic");
 	check(j::detail::mount_filesystem(true, "apfs") == j::FilesystemClass{true, "apfs"}, "MNT_LOCAL is local");
 	check(j::detail::mount_filesystem(true, "ufs").local && j::detail::mount_filesystem(true, "zfs").local, "UFS, ZFS");
 	for (auto name : {"nfs", "smbfs", "afpfs", "webdav", "p9fs", "weirdfs"}) {
-		check(j::detail::mount_filesystem(false, name) == j::FilesystemClass{false, name}, "no MNT_LOCAL refuses");
+		check(j::detail::mount_filesystem(false, name) == j::FilesystemClass{false, name}, "no MNT_LOCAL is non-local");
 	}
 	for (auto name : {"fusefs", "fusefs.sshfs", "macfuse", "osxfuse"}) {
-		check(!j::detail::mount_filesystem(true, name).local, "FUSE refuses even with MNT_LOCAL");
+		check(j::detail::mount_filesystem(true, name) == j::FilesystemClass{true, name}, "FUSE is just MNT_LOCAL");
 	}
 	check(j::detail::mount_filesystem(false, "") == j::FilesystemClass{false, "unnamed type"}, "unnamed type");
 }
@@ -123,52 +124,78 @@ void set_injection(const Injection& injection) {
 #endif
 }
 
-void refusals(const fs::path& directory) {
+// Each injected type locks, writes nothing, and is classified non-local by name.
+void warnings(const fs::path& directory) {
 	j::PosixIO io(fresh(directory));
 	(void)io.create_exclusive("meta-1");
 	io.replace_statfs(inject);
-	const Injection refused[] = {
+	const Injection foreign[] = {
 		{"nfs", 0x6969, false, "nfs"},
 		{"smb", 0xFE534D42, false, "smbfs"},
-		{"fuse", 0x65735546, true, "macfuse"},
+		{"fuse", 0x65735546, false, "fusefs"},
 		{"9p", 0x01021997, false, "p9fs"},
 		{"unknown", 0x0BADF00D, false, "weirdfs"},
 	};
-	for (const auto& injection : refused) {
+	for (const auto& injection : foreign) {
 		set_injection(injection);
-		const auto before = snapshot(directory);
-		try {
-			auto lock = io.acquire_directory_owner();
-			check(false, injection.name);
-		} catch (const std::system_error& error) {
-			check(error.code() == std::errc::not_supported, "a refusal is not_supported");
-			const std::string message = error.what();
+		const auto filesystem = io.directory_filesystem();
+		check(!filesystem.local, "an injected filesystem is non-local");
 #if defined(__linux__)
-			const std::string expected = injection.magic == 0x0BADF00D ? "0xBADF00D" : injection.name;
+		const std::string expected = injection.magic == 0x0BADF00D ? "unknown type 0xBADF00D" : injection.name;
 #else
-			const std::string expected = injection.type;
+		const std::string expected = injection.type;
 #endif
-			check(message.find(expected) != message.npos, "the refusal names the filesystem");
+		check(filesystem.name == expected, "the classification names the filesystem");
+		const auto before = snapshot(directory);
+		{
+			auto lock = io.acquire_directory_owner();
+			j::PosixIO other(directory);
+			expect_busy(other, directory, "a non-local filesystem still excludes in this process");
 		}
-		check(snapshot(directory) == before, "a refusal writes nothing");
+		check(snapshot(directory) == before, "locking writes nothing");
 	}
-	// A refusal takes no lock: another IO on the same directory still gets it.
-	j::PosixIO other(directory);
-	{ auto lock = other.acquire_directory_owner(); }
+	// FUSE reported as MNT_LOCAL is local off Linux, where the allow-list leaves it non-local.
+#if !defined(__linux__)
+	set_injection({"fuse", 0, true, "macfuse"});
+	check(io.directory_filesystem() == j::FilesystemClass{true, "macfuse"}, "FUSE is just MNT_LOCAL");
+#endif
+	set_injection({"ext4", 0xEF53, true, "apfs"});
+	check(io.directory_filesystem().local, "an injected local filesystem is local");
+	{ auto lock = io.acquire_directory_owner(); }
+	// The lock never inspects the filesystem; only the classification reports statfs's error.
 	set_injection({"io error", 0, false, ""});
 	injected_errno = EIO;
+	{ auto lock = io.acquire_directory_owner(); }
 	try {
-		auto lock = io.acquire_directory_owner();
-		check(false, "a failed statfs refuses");
+		(void)io.directory_filesystem();
+		check(false, "a failed statfs is reported");
 	} catch (const std::system_error& error) {
 		check(error.code() == std::error_code(EIO, std::generic_category()), "statfs's error survives");
 	}
-	set_injection({"ext4", 0xEF53, true, "apfs"});
-	{ auto lock = io.acquire_directory_owner(); }
 	io.replace_statfs(nullptr);
+	check(io.directory_filesystem().local, "the real filesystem is classified");
 	{ auto lock = io.acquire_directory_owner(); }
 }
 #endif
+
+int enotsup_flock(int, int) {
+	errno = ENOTSUP;
+	return -1;
+}
+
+// A flock the filesystem does not support is not_supported, for the caller to decide on.
+void unsupported(const fs::path& directory) {
+	j::PosixIO io(fresh(directory));
+	io.replace_flock(enotsup_flock);
+	try {
+		auto lock = io.acquire_directory_owner();
+		check(false, "an unsupported flock fails");
+	} catch (const std::system_error& error) {
+		check(error.code() == std::errc::not_supported, "an unsupported flock is not_supported");
+	}
+	io.replace_flock(nullptr);
+	auto lock = io.acquire_directory_owner();
+}
 
 void in_process(const fs::path& directory, const char* expect) {
 #ifdef KRONUZ_COMPLETION_STATFS
@@ -323,8 +350,9 @@ int main(int argc, char** argv) {
 	const fs::path directory(argv[1]);
 	classifier();
 #ifdef KRONUZ_COMPLETION_STATFS
-	refusals(directory);
+	warnings(directory);
 #endif
+	unsupported(directory);
 	in_process(directory, argc == 3 ? argv[2] : nullptr);
 	cross_process(argv[0], directory);
 	fs::remove_all(directory);

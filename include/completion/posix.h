@@ -55,9 +55,9 @@
 
 namespace kronuz::journal {
 
-// A directory's filesystem as the directory owner lock judges it.
+// A directory's filesystem as classified for the caller to warn on; the lock never refuses by it.
 struct FilesystemClass {
-	bool local = false;  // known local, so a directory flock excludes every other holder
+	bool local = false;  // known local, so a directory flock is known to exclude every other holder
 	std::string name;
 	bool operator==(const FilesystemClass&) const = default;
 };
@@ -202,7 +202,7 @@ inline void files_sync(std::span<const int> fds) {
 	for (int fd : fds) { file_sync(fd); }
 #endif
 }
-// Linux f_type: an allow-list of local filesystems; the refusals listed are only named.
+// Linux f_type: an allow-list of known-local filesystems; the others listed are only named.
 inline FilesystemClass linux_filesystem(std::uint32_t magic) {
 	struct Known { std::uint32_t magic; const char* name; bool local; };
 	static constexpr Known known[] = {
@@ -223,10 +223,9 @@ inline FilesystemClass linux_filesystem(std::uint32_t magic) {
 	std::snprintf(hex, sizeof hex, "0x%X", static_cast<unsigned>(magic));
 	return {false, std::string("unknown type ") + hex};
 }
-// macOS and the BSDs: the kernel's MNT_LOCAL, except FUSE, where "local" is the daemon's claim.
+// macOS and the BSDs: the kernel's MNT_LOCAL.
 inline FilesystemClass mount_filesystem(bool mnt_local, std::string_view type) {
-	const bool fuse = type.starts_with("fuse") || type.starts_with("macfuse") || type.starts_with("osxfuse");
-	return {mnt_local && !fuse, type.empty() ? std::string("unnamed type") : std::string(type)};
+	return {mnt_local, type.empty() ? std::string("unnamed type") : std::string(type)};
 }
 } // namespace detail
 
@@ -417,26 +416,46 @@ public:
 		} catch (...) { ::close(fd); throw; }
 	}
 	// Locks this IO's directory handle, exclusive and nonblocking, while the returned lock
-	// lives. Writes nothing. A filesystem not known local refuses with errc::not_supported;
-	// busy is EWOULDBLOCK, as acquire_owner reports it. Destroy the lock before the IO.
+	// lives. Writes nothing. Any filesystem is tried (see directory_filesystem to warn);
+	// busy is EWOULDBLOCK, as acquire_owner reports it, and a flock the filesystem does not
+	// support is errc::not_supported. Destroy the lock before the IO.
 	std::unique_ptr<OwnerLock> acquire_directory_owner() override {
 		if (directory_locked_) { throw std::logic_error("journal directory already locked"); }
-		const auto filesystem = directory_filesystem();
-		if (!filesystem.local) { refuse_filesystem(filesystem.name, "is not a known-local filesystem"); }
 		auto owner = control<DirectoryLock>(*this);
 		int result;
-		do { result = ::flock(directory_, LOCK_EX | LOCK_NB); } while (result < 0 && errno == EINTR);
+		do { result = flock_(directory_, LOCK_EX | LOCK_NB); } while (result < 0 && errno == EINTR);
 		if (result < 0) {
-			if (errno == EOPNOTSUPP || errno == ENOTSUP) { refuse_filesystem(filesystem.name, "does not lock directories"); }
+			if (errno == EOPNOTSUPP || errno == ENOTSUP) {
+				std::string name = "this filesystem";
+				try { name = directory_filesystem().name; } catch (const std::system_error&) {}
+				throw std::system_error(std::make_error_code(std::errc::not_supported),
+					"directory owner lock: " + name + " does not lock directories");
+			}
 			detail::system_failure("lock journal directory");
 		}
 		owner->install();
 		directory_locked_ = true;
 		return owner;
 	}
+	// The directory's filesystem, so a caller can warn when it is not known local.
+	FilesystemClass directory_filesystem() const {
+#ifdef KRONUZ_COMPLETION_STATFS
+		struct statfs status{};
+		int result;
+		do { result = statfs_ ? statfs_(directory_, &status) : ::fstatfs(directory_, &status); }
+		while (result < 0 && errno == EINTR);
+		if (result < 0) { detail::system_failure("inspect journal directory filesystem"); }
+		return classify_filesystem(status);
+#else
+		return {false, "a filesystem this platform cannot classify"};
+#endif
+	}
+	using FlockCall = int (*)(int fd, int operation);
+	// A test seam: the flock answer acquire_directory_owner reports; null is flock.
+	void replace_flock(FlockCall call) noexcept { flock_ = call ? call : &::flock; }
 #ifdef KRONUZ_COMPLETION_STATFS
 	using StatfsCall = int (*)(int fd, struct statfs* result);
-	// A test seam: the filesystem answer acquire_directory_owner classifies; null is fstatfs.
+	// A test seam: the filesystem answer directory_filesystem classifies; null is fstatfs.
 	void replace_statfs(StatfsCall call) noexcept { statfs_ = call; }
 #endif
 	std::unique_ptr<File> make_closed_file() override { return control<ReusableFile>(*this); }
@@ -579,22 +598,6 @@ private:
 		PosixIO& io_;
 		bool held_ = false;
 	};
-	FilesystemClass directory_filesystem() const {
-#ifdef KRONUZ_COMPLETION_STATFS
-		struct statfs status{};
-		int result;
-		do { result = statfs_ ? statfs_(directory_, &status) : ::fstatfs(directory_, &status); }
-		while (result < 0 && errno == EINTR);
-		if (result < 0) { detail::system_failure("inspect journal directory filesystem"); }
-		return classify_filesystem(status);
-#else
-		return {false, "a filesystem this platform cannot classify"};
-#endif
-	}
-	[[noreturn]] static void refuse_filesystem(const std::string& name, const char* reason) {
-		throw std::system_error(std::make_error_code(std::errc::not_supported),
-			"directory owner lock refuses " + name + ", which " + reason);
-	}
 	int open_file(std::string_view name, bool create) {
 		detail::PosixName component(name);
 		int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
@@ -635,6 +638,7 @@ private:
 	kronuz::io::completion::AllocationContext context_;
 	int directory_ = -1, owner_fd_ = -1;
 	bool directory_locked_ = false;
+	FlockCall flock_ = &::flock;
 #ifdef KRONUZ_COMPLETION_STATFS
 	StatfsCall statfs_ = nullptr;
 #endif
