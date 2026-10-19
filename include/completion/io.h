@@ -122,6 +122,11 @@ public:
 	// Successful creation adds exactly one zero-length owner.lock and no
 	// other entries; format-layer bootstrap accounting relies on this.
 	virtual std::unique_ptr<OwnerLock> acquire_owner(bool create) = 0;
+	// The owner lock on the directory handle itself, held while the returned lock lives:
+	// no lock file, nothing written. Create and recovery take it alike.
+	virtual std::unique_ptr<OwnerLock> acquire_directory_owner() {
+		throw std::logic_error("directory owner lock unsupported");
+	}
 	// Admit reusable closed controls during startup. Into hooks use this same
 	// backend, reject live/foreign destinations before IO, and allocate no control.
 	virtual std::unique_ptr<File> make_closed_file() { throw std::logic_error("reusable file controls unsupported"); }
