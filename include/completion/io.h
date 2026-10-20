@@ -30,6 +30,7 @@
 #include <string>
 #include <optional>
 #include <stdexcept>
+#include <system_error>
 
 namespace kronuz::journal {
 
@@ -98,6 +99,25 @@ public:
 	virtual ~OwnerLock() = default;
 };
 
+// Which inodes an owner lock holds: owner.lock, the directory itself, or both (the
+// directory first, released last). Only pairings involving `both` exclude every other mode;
+// `file` and `directory` lock different inodes and do not exclude each other.
+enum class OwnerLockMode { file, directory, both };
+// How file and both modes reach owner.lock. A directory-only lock takes no file.
+enum class OwnerFile { open_existing, create_exclusive };
+struct OwnerLockOptions {
+	OwnerLockMode mode = OwnerLockMode::both;
+	OwnerFile owner_file = OwnerFile::open_existing;
+	// What the legacy acquire_owner(bool) and acquire_directory_owner() take.
+	static constexpr OwnerLockOptions legacy_file(bool create) noexcept {
+		return {OwnerLockMode::file, create ? OwnerFile::create_exclusive : OwnerFile::open_existing};
+	}
+	static constexpr OwnerLockOptions legacy_directory() noexcept {
+		return {OwnerLockMode::directory, OwnerFile::open_existing};
+	}
+	bool operator==(const OwnerLockOptions&) const = default;
+};
+
 class DirectoryCursor {
 public:
 	virtual ~DirectoryCursor() = default;
@@ -142,13 +162,29 @@ public:
 	// unknown, so a caller that refuses untrusted directories refuses it. A wrapper forwards.
 	virtual DirectoryTrust directory_trust() const { return {}; }
 	virtual ManagedCapabilities managed_capabilities() const noexcept { return {}; }
-	// Creation is exclusive. Recovery opens the existing stable lock; neither
-	// manifest replacement nor fencing releases or replaces this lock.
-	// Successful creation adds exactly one zero-length owner.lock and no
-	// other entries; format-layer bootstrap accounting relies on this.
+	// The owner lock, held while the returned lock lives. Creation is exclusive; recovery
+	// opens the existing stable owner.lock; neither manifest replacement nor fencing releases
+	// it. Successfully creating adds exactly one zero-length owner.lock and no other entries
+	// (format-layer bootstrap accounting relies on this); a directory-only lock writes
+	// nothing. Busy is EWOULDBLOCK and an unsupported lock errc::not_supported, in every
+	// mode, with no fallback to another mode. Pass OwnerLockOptions explicitly: `{}` alone
+	// selects the bool overload.
+	[[nodiscard]] std::unique_ptr<OwnerLock> acquire_owner(const OwnerLockOptions& options) {
+		if (options.mode != OwnerLockMode::file && options.mode != OwnerLockMode::directory &&
+			options.mode != OwnerLockMode::both) {
+			throw std::invalid_argument("unknown owner lock mode");
+		}
+		if (options.owner_file != OwnerFile::open_existing && options.owner_file != OwnerFile::create_exclusive) {
+			throw std::invalid_argument("unknown owner file policy");
+		}
+		if (options.mode == OwnerLockMode::directory && options.owner_file != OwnerFile::open_existing) {
+			throw std::invalid_argument("a directory owner lock creates no file");
+		}
+		return lock_owner(options);
+	}
+	// Legacy presets, kept source-compatible: OwnerLockOptions::legacy_file(create) and
+	// legacy_directory(). A backend implementing lock_owner forwards both to it.
 	virtual std::unique_ptr<OwnerLock> acquire_owner(bool create) = 0;
-	// The owner lock on the directory handle itself, held while the returned lock lives:
-	// no lock file, nothing written. Create and recovery take it alike.
 	virtual std::unique_ptr<OwnerLock> acquire_directory_owner() {
 		throw std::logic_error("directory owner lock unsupported");
 	}
@@ -181,6 +217,14 @@ public:
 	// device flush among them. After a failure, which files are durable is unspecified.
 	virtual void sync_files(std::span<File* const> files) {
 		for (auto* file : files) { file->sync(); }
+	}
+
+protected:
+	// The one owner-lock implementation, given validated options. A backend that cannot
+	// exclude in a mode throws not_supported there; it never returns a lock that excludes
+	// nothing. The default supports no mode and never forwards to the legacy calls.
+	virtual std::unique_ptr<OwnerLock> lock_owner(const OwnerLockOptions&) {
+		throw std::system_error(std::make_error_code(std::errc::not_supported), "owner lock options unsupported by this IO");
 	}
 };
 
