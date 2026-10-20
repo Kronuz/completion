@@ -9,8 +9,9 @@ Catalog: cpp-libraries branch `cl-2-owner-lock`, worktree
 
 ## State
 
-Implemented, tested and documented; ready for code review. Not merged. Completion CI
-green on all eight jobs (run 39380284199, at 91d62cb; later commits are docs only).
+Code review (`docs/reviews/cl-2-code.md`, REJECT on CL2-1) folded in; ready for the scoped
+re-check. Not merged. Completion CI for the review fixes: see the run id at the end of
+this section's Done list. Earlier green run 39380284199 was at 91d62cb.
 
 ## Done
 
@@ -18,24 +19,56 @@ green on all eight jobs (run 39380284199, at 91d62cb; later commits are docs onl
   create-exclusive), one PosixIO implementation with legacy presets forwarding to it;
   suite `completion_owner_lock` (matrix, partial failure, EINTR, unsupported, create and
   recover, aliases, lifetime through an image job, refusals). Six mutation probes (order,
-  EINTR, file-only fallback, held checks, unwind, EOPNOTSUPP mapping) each fail it.
+  EINTR, file-only fallback, held checks, unwind, EOPNOTSUPP mapping) each fail it; the
+  reviewer rebuilt them and eight more (`review-cl2/.scratch/mutants`, 12 of 14 killed, the
+  2 survivors unobservable by design).
 - Docs: README (three modes, quick start on `both`, compiled), ARCHITECTURE, AGENTS
-  (two traps), PLATFORM_FINDINGS section 9 (dcf4b94).
+  (traps), PLATFORM_FINDINGS section 9.
 - 91d62cb the API and `completion_owner_lock`; CI run 39380284199 passed it on
   freebsd-x86_64, linux-x86_64-gcc, linux-x86_64-clang, linux-arm64-gcc, linux-asan-ubsan,
   linux-tsan, macos-x86_64 and macos-arm64. Each topology's matrix asserts 17 excluding
   pairings and 8 acquiring legacy file/directory controls (separate processes, distinct
   IOs, one shared IO).
-- Local: macOS x86_64 Apple clang, Debug 15/15 and ASan+UBSan 15/15.
 - cpp-libraries 5d41c2d: the completion catalog entry (C4).
-- Detent replay: local branch `cl-2-detent-replay` (worktree
-  `~/code/Kronuz/completion-wt/cl-2-detent-replay`, head 5bd697f) is 5251cf9 plus the eight
-  commits to 7734544 plus 91d62cb, headers identical to this branch. Detent 3d05a4f (Release,
-  every default target, its own pins, completion overridden) built; ctest 166/167, then
-  167/167 on a full rerun. The one failure, `test_local_paged_snapshot_plan` (aborted), waits
-  at most 5 s for heap reclamation and calls no owner-lock code; it passed 20/20 isolated.
-  Unattributed timing under the light hold, not reproduced.
+- Detent replay: local branch `cl-2-detent-replay` (head 5bd697f), Detent 3d05a4f Release
+  with completion overridden: ctest 166/167, then 167/167 on a full rerun.
 - journal dbf753f against this branch: Debug, 8/8.
+
+Review fixes (`docs/reviews/cl-2-code.md`):
+
+- CL2-1: `IO::acquire_owner(braced_owner_options_need_a_type) = delete` (a scoped enum), so
+  `acquire_owner({})` is ambiguous and fails to compile through `IO&` and `PosixIO`; `true`,
+  `false`, a `bool`, `0`, `OwnerLockOptions{}`, `{mode}` and designated forms still compile.
+  CTest `completion_owner_braced_refused` (`test/owner_braced_check.cmake`) compiles
+  `test/owner_braced_refused.cc` once per case: the refusals must fail naming the deleted
+  overload, the control must build. With the overload removed the refusals compile. The
+  reviewer's probe's `{}` assertions now hold (`BracedCompiles<IO>` and `<PosixIO>` false).
+  Residual, as the review notes: a derived type overriding only the bool call without
+  `using IO::acquire_owner;` still takes `{}` as bool.
+- CL2-3: the held flags are atomic claims (`exchange` before any `flock`); an `Owner`
+  releases only what it claimed, and a claim clears after its lock is gone;
+  `owner_fd_` is atomic. The reviewer's `shared_io_race` probe, 2000 iterations each for
+  `directory` and `both`: 0 double holds and 0 droppable locks (1990 and 1993 bad on the
+  branch before), and 0 TSan reports. New `concurrent()` in `completion_owner_lock`
+  (300 iterations in each mode) fails on the previous `posix.h` and passes now.
+- CL2-4: corrected below.
+- CL2-2: README, ARCHITECTURE and `io.h` state that a failed create may leave a zero-length
+  `owner.lock`; recover with `open_existing` (a retried create is `file_exists`).
+- CL2-7: PLATFORM_FINDINGS section 9 says ENOLCK is a plain `system_error`, failing closed.
+- CL2-6: PLATFORM_FINDINGS section 9 notes the directory not-supported text now reads
+  "lock journal directory: ... does not lock directories"; the code is unchanged.
+- Local, Homebrew clang 23 Debug: Debug, ASan+UBSan and TSan, 16/16 each (the suite plus
+  the braced-refusal test), 0 sanitizer reports.
+
+## Detent (CL2-4, corrected)
+
+`test_local_paged_snapshot_plan` is a pre-existing Detent flake, not timing and not CL-2.
+It fails with an uncaught `detent::distribution::StoragePressure`, and it does take the
+owner lock (`make_disk_store` reaches `acquire_owner(create_owner)` through the changed
+path), so the earlier claim that it calls no owner-lock code was wrong. The reviewer's A/B
+(same Detent source, only the completion headers differing): 2 of 300 failures on main's
+headers, 1 of 300 on CL-2's, 2 of 200 on the developer's binary. The lead passes the
+`StoragePressure` escape to Detent. The Detent result stands (166/167, then 167/167).
 
 ## Consumer test IOs (changes come later, in those repos)
 
@@ -64,7 +97,7 @@ Each must model exclusion or leave `lock_owner` unoverridden (the options call t
 
 ## Next
 
-- Code review of both branches; land after it.
+- Scoped re-check of CL2-1 to CL2-4, then land.
 - Consumer migrations: Detent to `both` (StorageSession and Journal-owned locks), journal
   `MemoryIO`, strata `faultfs` and wrappers (above). Then deprecate the bool form.
 - Not run here: strata's suite against the branch; Linux tmpfs for `owner_lock`.
