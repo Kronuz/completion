@@ -59,6 +59,8 @@ library's compatibility gate.
 - **`file` and `directory` owner locks do not exclude each other.** They lock different
   inodes; only `both` excludes every owner. Keep a directory under one protocol, and
   keep `owner_lock_test`'s legacy pairing acquiring: it is the unsafe control.
+- **`acquire_owner({})` must stay refused.** The deleted scoped-enum overload in `io.h`
+  keeps `{}` off the legacy bool overload; `owner_braced_refused` proves it.
 - **One owner-lock implementation.** A backend overrides `lock_owner`; its legacy
   `acquire_owner(bool)` and `acquire_directory_owner()` forward to it, never the reverse,
   and a mode it cannot exclude in throws `not_supported` rather than returning a lock that

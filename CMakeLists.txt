@@ -42,6 +42,11 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     foreach(t core posix_resource scan inspection cursor_close reuse image_close create_into sync_files map dir_lock dir_trust owner_lock)
       add_test(NAME completion_${t} COMMAND completion_${t}_test "${CMAKE_CURRENT_BINARY_DIR}/${t}-state")
     endforeach()
+    # acquire_owner({}) must not compile; the spellings that still work must.
+    add_test(NAME completion_owner_braced_refused COMMAND ${CMAKE_COMMAND} -DCXX=${CMAKE_CXX_COMPILER}
+      -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/test/owner_braced_refused.cc
+      "-DINCLUDES=$<JOIN:$<TARGET_PROPERTY:completion,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:metrics::metrics,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:allocators::resources,INTERFACE_INCLUDE_DIRECTORIES>,|>"
+      -P ${CMAKE_CURRENT_SOURCE_DIR}/test/owner_braced_check.cmake)
     # The directory lock again on tmpfs, where Linux has one (/dev/shm); the test checks it is.
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IS_DIRECTORY /dev/shm)
       string(MD5 dir_lock_id "${CMAKE_CURRENT_BINARY_DIR}")

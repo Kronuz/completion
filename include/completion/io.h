@@ -154,6 +154,8 @@ struct DirectoryTrust {
 
 class IO {
 public:
+	// Only the deleted overload below takes this; its name is the diagnostic for `{}`.
+	enum class braced_owner_options_need_a_type {};
 	virtual ~IO() = default;
 	// The directory's filesystem. An IO that does not classify reports it unclassified, not
 	// local, so a caller that refuses non-local filesystems refuses it. A wrapper forwards.
@@ -167,8 +169,10 @@ public:
 	// it. Successfully creating adds exactly one zero-length owner.lock and no other entries
 	// (format-layer bootstrap accounting relies on this); a directory-only lock writes
 	// nothing. Busy is EWOULDBLOCK and an unsupported lock errc::not_supported, in every
-	// mode, with no fallback to another mode. Pass OwnerLockOptions explicitly: `{}` alone
-	// selects the bool overload.
+	// mode, with no fallback to another mode. A failed create may leave owner.lock behind,
+	// for open_existing to recover. `acquire_owner({})` is refused at compile time: it would
+	// otherwise take the legacy file-only bool overload. Name the options (`OwnerLockOptions{}`
+	// is `both`).
 	[[nodiscard]] std::unique_ptr<OwnerLock> acquire_owner(const OwnerLockOptions& options) {
 		if (options.mode != OwnerLockMode::file && options.mode != OwnerLockMode::directory &&
 			options.mode != OwnerLockMode::both) {
@@ -182,6 +186,9 @@ public:
 		}
 		return lock_owner(options);
 	}
+	// `{}` converts identically to this and to bool, so it is ambiguous; true, false, a bool
+	// and 0 reach only the bool overload, as no implicit conversion yields a scoped enum.
+	void acquire_owner(braced_owner_options_need_a_type) = delete;
 	// Legacy presets, kept source-compatible: OwnerLockOptions::legacy_file(create) and
 	// legacy_directory(). A backend implementing lock_owner forwards both to it.
 	virtual std::unique_ptr<OwnerLock> acquire_owner(bool create) = 0;

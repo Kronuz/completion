@@ -1,0 +1,30 @@
+# Usage: cmake -DCXX=... -DSOURCE=... -DINCLUDES="a;b" -P owner_braced_check.cmake
+# CASE_IO and CASE_POSIX must fail naming the deleted overload; CASE_COMPILING must build.
+string(REPLACE "|" ";" dirs "${INCLUDES}")
+set(INCLUDES "")
+foreach(dir IN LISTS dirs)
+  if(dir)
+    list(APPEND INCLUDES "-I${dir}")
+  endif()
+endforeach()
+
+function(compile case result output)
+  execute_process(COMMAND ${CXX} -std=c++20 -fsyntax-only -D${case} ${INCLUDES} ${SOURCE}
+    RESULT_VARIABLE r OUTPUT_VARIABLE o ERROR_VARIABLE e)
+  set(${result} ${r} PARENT_SCOPE)
+  set(${output} "${o}${e}" PARENT_SCOPE)
+endfunction()
+
+compile(CASE_COMPILING r out)
+if(NOT r EQUAL 0)
+  message(FATAL_ERROR "the legacy and named spellings must compile:\n${out}")
+endif()
+foreach(case CASE_IO CASE_POSIX)
+  compile(${case} r out)
+  if(r EQUAL 0)
+    message(FATAL_ERROR "${case}: acquire_owner({}) compiled")
+  endif()
+  if(NOT out MATCHES "braced_owner_options_need_a_type")
+    message(FATAL_ERROR "${case}: refused for another reason:\n${out}")
+  endif()
+endforeach()
