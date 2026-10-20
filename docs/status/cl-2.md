@@ -22,6 +22,31 @@ docs, catalog, Detent replay and CI next.
 - Docs: README (three modes, quick start on `both`, compiled), ARCHITECTURE, AGENTS
   (two traps), PLATFORM_FINDINGS section 9.
 
+## Consumer test IOs (changes come later, in those repos)
+
+Each must model exclusion or leave `lock_owner` unoverridden (the options call then reports
+`not_supported`); none may return a lock that excludes nothing.
+
+- journal `include/journal/memory_io.h:126`: `acquire_owner(bool)` returns a bare
+  `OwnerLock`, a no-op success, and never adds `owner.lock` to the model. Needs held flags
+  for the file and the directory (separately, so the legacy pairing still acquires), busy
+  while held, `owner.lock` created on create, and a `lock_owner` taking the directory then
+  the file and unwinding on failure.
+- journal `test/journal_test.cc:119`: models file exclusion and create/exists; add
+  `lock_owner` when Journal carries `OwnerLockOptions` (`journal.h:253, 277, 305, 605, 621`).
+- strata `include/strata/faultfs.hh:400-415`: models file and directory exclusion apart;
+  needs `lock_owner` (both: directory then file, unwound) before strata calls
+  `acquire_owner(OwnerLockOptions{directory})`. The forwarding wrappers in
+  `test/directory_test.cc:136`, `test/index_test.cc:105` and
+  `test/background_merge_test.cc:175` need a `lock_owner` forwarding to
+  `inner_->acquire_owner(options)`. Note: `index.hh:2348-2352` treats `not_supported` under
+  `warn` as proceeding unlocked, so a test IO without `lock_owner` would warn rather than
+  fail once strata calls the options form.
+- Detent `tests/detent_local/test_inventory.cc:40` returns a no-op lock and
+  `tests/detent_delivery/test_completion_scheduler.cc:17` returns null; both need to model
+  exclusion or report `not_supported` before `StorageSession` (`storage_session.cc:19,
+  :107`) moves to `both`.
+
 ## Next
 
 - Catalog; Detent replay; journal against the branch; CI.
