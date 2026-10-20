@@ -310,3 +310,37 @@ in the same series (C4).
 - A test that drops the image-job facade while its original is outstanding.
 - The journal suite rebuilt from source. I reran the developer's journal build (it wrote
   `Testing/` in `~/.scratch/cl-2/journal-build`).
+
+## Re-check
+
+Scope: CL2-1, CL2-2, CL2-3, CL2-4, CL2-6 and CL2-7, `git log 616a8c1..54b60db` (code at `9ed8efa`,
+the tip `54b60db` is docs only). Re-checked 2026-10-20 in this worktree at `54b60db`, Homebrew
+clang 23, `quiet check` exit 0 before every compile. Probe copies and logs are in
+`~/.scratch/cl2-recheck/` (`braced_real.cc`, `race.sh`).
+
+| Finding | Verdict | Evidence |
+|---|---|---|
+| CL2-1 | **CLOSED** | `io.h:158` (scoped enum) and `io.h:191` (`= delete`). A `static_assert` probe against the real headers (`braced_real.cc`): `{}` is ill-formed through `IO&` and `PosixIO`; `true`, `false`, a `bool` variable, `0`, `OwnerLockOptions{}`, `{mode}` and designated forms all compile through both. Flipping the `{}` assertion makes the probe fail, so it is live. The original `braced_init_probe.cc` now fails to build on exactly its old "`{}` compiles" assertions (its Part A runtime line and `BracedCompiles<IO>`/`<PosixIO>`), which is the fix working. CTest `completion_owner_braced_refused` (`CMakeLists.txt:45`, `test/owner_braced_check.cmake`) passes; with `io.h:191` deleted it fails with "CASE_IO: acquire_owner({}) compiled". The check also requires the diagnostic to name the deleted overload, so it cannot pass on an unrelated compile error. Residual (a derived type that overrides only the bool call, with no `using`, still takes `{}` as bool; the probe asserts it) is as stated, and is recorded in the ledger only, not in `io.h` or the README. Not blocking. |
+| CL2-2 | **CLOSED** | `io.h:172` ("A failed create may leave owner.lock behind, for open_existing to recover"), `README.md:84-85`, and ARCHITECTURE (the "A failed `create_exclusive` ... leaves the zero-length `owner.lock`" sentences, with the unlink-unsafe reason and the `file_exists` retry). The condition asked for `io.h` and ARCHITECTURE; both state it. |
+| CL2-3 | **CLOSED** | `posix.h:586-587` claim with `exchange` before any `flock` (`lock_owner` at `:601-602`, `flock` at `:603`, `:606`); `~Owner` at `:576-585` CASes `owner_fd_` only if it is its own fd, closes the fd, then clears `file_claimed_`, and for the directory runs `LOCK_UN` and only then clears `directory_claimed_`. A loser that claimed nothing releases nothing (`file_`/`directory_` false); one that claimed only the file clears only that. `owner_fd_` is atomic (`:667`), which also covers the `sync_directory` read (`:542`). Probe `shared_io_race`, 2,000 iterations each: `directory` 0 double holds and 0 droppable locks, `both` 0 and 0, on the plain build and on the TSan build, with no TSan report (before: 1990 and 1993). New `concurrent()` (`owner_lock_test.cc:503`, 300 iterations in each of `both`, `directory`, `file`): with `posix.h` reverted to `616a8c1` it fails ("failed at line 523: the winner still holds the directory"); restored, it passes. Full suite: Debug 16/16, TSan 16/16, 0 `WARNING: ThreadSanitizer`. |
+| CL2-4 | **CLOSED** | `docs/status/cl-2.md` "Detent (CL2-4, corrected)": a pre-existing flake, uncaught `StoragePressure`, takes the owner lock via `make_disk_store`, A/B 2/300 (main), 1/300 (CL-2), 2/200 (developer binary). The numbers and the attribution match my review's table. The old "calls no owner-lock code" and "unattributed timing" text is gone from the ledger (`:69` quotes it only as the retracted claim). The hand-off to Detent is stated as the lead's. |
+| CL2-6 | **CLOSED** | `docs/PLATFORM_FINDINGS.md:197-198` records the new "lock journal directory: ... does not lock directories" text and that the code is unchanged. |
+| CL2-7 | **CLOSED** | `docs/PLATFORM_FINDINGS.md:194-196`: ENOLCK is a plain `system_error`, fails closed, and a proceed-unlocked-on-`not_supported` consumer refuses there. |
+| Catalog | **CLOSED** | cpp-libraries `4707ea1` (tip of `cl-2-owner-lock`, one-line AGENTS.md change, parent `5d41c2d`): the completion entry now says `acquire_owner({})` does not compile (a deleted overload on a scoped enum), to write `OwnerLockOptions{}` (`both`), and that one thread wins when several acquire through one IO. Accurate to the code. It does not mention the failed-create leftover; the review did not require it. |
+
+New findings: none. One observation for the lead, not a finding: the README sentence "Acquisitions
+through one `PosixIO` are safe from several threads" (`README.md:85-87`) covers acquisition only,
+which is all that the claim protocol and test cover; it does not make `IO` generally thread-safe.
+
+CI: run 39387877593 (workflow_dispatch on `cl-2-owner-lock`) finished green on all eight jobs
+(linux-tsan, linux-arm64-gcc, freebsd-x86_64, linux-asan-ubsan, macos-arm64, linux-x86_64-gcc,
+linux-x86_64-clang, macos-x86_64), conclusion success, head SHA `9ed8efa` (confirmed with
+`gh run view --json headSha`).
+
+Not run: the ASan+UBSan build (the Debug and TSan suites were run, plus both race builds);
+Linux, FreeBSD and tmpfs locally (CI covers them); the earlier mutants m1 to m14 (only the two
+new reverts); strata's and consensus's suites; Detent's suite or the flake A/B again; the
+journal suite.
+
+Verdict: nothing blocks landing. CL2-1 (blocking) and the conditions on CL2-2, CL2-3, CL2-4
+and CL2-7 are met.
