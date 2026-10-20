@@ -9,8 +9,8 @@ Catalog: cpp-libraries branch `cl-2-owner-lock`, worktree
 
 ## State
 
-Implemented and tested locally (macOS x86_64, Apple clang, Debug and ASan+UBSan);
-docs, catalog, Detent replay and CI next.
+Implemented, tested and documented; ready for code review. Not merged. Completion CI
+green on all eight jobs (run 39380284199, at 91d62cb; later commits are docs only).
 
 ## Done
 
@@ -20,7 +20,22 @@ docs, catalog, Detent replay and CI next.
   recover, aliases, lifetime through an image job, refusals). Six mutation probes (order,
   EINTR, file-only fallback, held checks, unwind, EOPNOTSUPP mapping) each fail it.
 - Docs: README (three modes, quick start on `both`, compiled), ARCHITECTURE, AGENTS
-  (two traps), PLATFORM_FINDINGS section 9.
+  (two traps), PLATFORM_FINDINGS section 9 (dcf4b94).
+- 91d62cb the API and `completion_owner_lock`; CI run 39380284199 passed it on
+  freebsd-x86_64, linux-x86_64-gcc, linux-x86_64-clang, linux-arm64-gcc, linux-asan-ubsan,
+  linux-tsan, macos-x86_64 and macos-arm64. Each topology's matrix asserts 17 excluding
+  pairings and 8 acquiring legacy file/directory controls (separate processes, distinct
+  IOs, one shared IO).
+- Local: macOS x86_64 Apple clang, Debug 15/15 and ASan+UBSan 15/15.
+- cpp-libraries 5d41c2d: the completion catalog entry (C4).
+- Detent replay: local branch `cl-2-detent-replay` (worktree
+  `~/code/Kronuz/completion-wt/cl-2-detent-replay`, head 5bd697f) is 5251cf9 plus the eight
+  commits to 7734544 plus 91d62cb, headers identical to this branch. Detent 3d05a4f (Release,
+  every default target, its own pins, completion overridden) built; ctest 166/167, then
+  167/167 on a full rerun. The one failure, `test_local_paged_snapshot_plan` (aborted), waits
+  at most 5 s for heap reclamation and calls no owner-lock code; it passed 20/20 isolated.
+  Unattributed timing under the light hold, not reproduced.
+- journal dbf753f against this branch: Debug, 8/8.
 
 ## Consumer test IOs (changes come later, in those repos)
 
@@ -49,7 +64,10 @@ Each must model exclusion or leave `lock_owner` unoverridden (the options call t
 
 ## Next
 
-- Catalog; Detent replay; journal against the branch; CI.
+- Code review of both branches; land after it.
+- Consumer migrations: Detent to `both` (StorageSession and Journal-owned locks), journal
+  `MemoryIO`, strata `faultfs` and wrappers (above). Then deprecate the bool form.
+- Not run here: strata's suite against the branch; Linux tmpfs for `owner_lock`.
 
 ## Blocked on
 
