@@ -80,7 +80,11 @@ legacy `io.acquire_owner(bool)` and `io.acquire_directory_owner()` take: they lo
 different inodes, so a file-only owner and a directory-only owner do not exclude each
 other. Recovery opens the existing `owner.lock` (`OwnerFile::open_existing`, the default);
 a directory-only lock writes nothing. Busy is `EWOULDBLOCK` in every mode. Pass the
-options by name: `io.acquire_owner({})` selects the bool overload.
+options by name: `io.acquire_owner({})` does not compile (it would take the legacy file-only
+bool overload), while `OwnerLockOptions{}` is `both`. A failed `create_exclusive` may leave
+a zero-length `owner.lock`; recover with `open_existing`. Acquisitions through one
+`PosixIO` are safe from several threads: one wins and the others get `logic_error` or
+busy, and a loser never releases the winner's lock.
 
 Locks are tried on any filesystem. `io.directory_filesystem()` reports whether it is known
 local (`local`, plus its `name`), so a host can warn before it relies on the lock over NFS,

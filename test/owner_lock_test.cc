@@ -26,6 +26,7 @@
 // the lock's lifetime through an image job, and owner.lock and root refusals.
 #include "completion/api.h"
 #include "completion/image.h"
+#include <atomic>
 #include <csignal>
 #include <fcntl.h>
 #include <filesystem>
@@ -38,6 +39,7 @@
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 extern char** environ;
@@ -496,6 +498,38 @@ void aliases(const fs::path& directory) {
 	}
 }
 
+// Two threads acquire through one IO at once: exactly one wins, and the loser's unwind never
+// releases what the winner holds, so a fresh IO still finds it busy.
+void concurrent(const fs::path& directory) {
+	constexpr int iterations = 300;
+	for (const auto mode : {Mode::both, Mode::directory, Mode::file}) {
+		for (int i = 0; i < iterations; ++i) {
+			j::PosixIO io(fresh(directory));
+			{ auto seed = io.acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive}); }
+			std::atomic<int> ready{0}, acquired{0};
+			std::unique_ptr<j::OwnerLock> locks[2];
+			auto take = [&](int index) {
+				ready.fetch_add(1);
+				while (ready.load() < 2) {}
+				try {
+					locks[index] = io.acquire_owner(j::OwnerLockOptions{mode, j::OwnerFile::open_existing});
+					acquired.fetch_add(1);
+				} catch (const std::exception&) {}
+			};
+			std::thread first(take, 0), second(take, 1);
+			first.join();
+			second.join();
+			check(acquired.load() == 1, "exactly one thread acquires through one IO");
+			if (mode != Mode::file) { check(!directory_free(directory), "the winner still holds the directory"); }
+			if (mode != Mode::directory) { check(!file_free(directory), "the winner still holds owner.lock"); }
+			locks[0].reset();
+			locks[1].reset();
+			check(directory_free(directory) && file_free(directory), "released once the winner is dropped");
+			(void)io.acquire_owner(j::OwnerLockOptions{mode, j::OwnerFile::open_existing});
+		}
+	}
+}
+
 // An IO with only the legacy bool call: the options call reports not_supported in every
 // mode and never forwards to it. A wrapper forwards lock_owner to its backend's acquire_owner.
 struct LegacyIO final : j::IO {
@@ -633,6 +667,7 @@ int main(int argc, char** argv) {
 	interrupted(directory);
 	unsupported(directory);
 	aliases(directory);
+	concurrent(directory);
 	base(directory);
 	lifetime(directory);
 	refusals(directory);

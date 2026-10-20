@@ -191,6 +191,11 @@ the directory are different inodes. Detent used the first and strata the second.
   and FreeBSD.
 - macOS has distinct `ENOTSUP` (45) and `EOPNOTSUPP` (102); Linux defines them equal. Both
   map to `std::errc::not_supported`, which is `ENOTSUP`.
+- Linux NFS without lockd returns `ENOLCK` from `flock`. It surfaces as a plain `system_error`,
+  not `not_supported`, so it fails closed: a consumer that proceeds unlocked on
+  `not_supported` (strata's warn policy) refuses there instead.
+- The directory-first lock error text now reads "lock journal directory: ... does not lock
+  directories" (the legacy text was "directory owner lock: ..."); the code is unchanged.
 - A new call does not repair binaries already running: an old file-only process and an
   old directory-only process still do not exclude each other.
 

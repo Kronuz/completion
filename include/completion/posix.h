@@ -539,7 +539,7 @@ public:
 		// Directory fsync establishes namespace ordering; fullsync then asks the storage
 		// device to flush its cache, through the owner file when held, else the directory.
 		// Unsupported barriers fail closed.
-		detail::file_sync(owner_fd_ >= 0 ? owner_fd_ : directory_);
+		{ const int owner = owner_fd_.load(); detail::file_sync(owner >= 0 ? owner : directory_); }
 #endif
 	}
 
@@ -568,43 +568,45 @@ private:
 		}
 		return *target;
 	}
-	// Holds the directory lock, owner.lock, or both; releases the file first.
+	// Holds the directory lock, owner.lock, or both; releases the file first. It releases only
+	// the claims it made, and a claim clears after its lock is gone, so a loser never frees
+	// what the winner holds.
 	class Owner : public OwnerLock {
 	public:
 		explicit Owner(PosixIO& io) : io_(io) {}
 		~Owner() override {
 			if (fd_ >= 0) {
-				if (io_.owner_fd_ == fd_) { io_.owner_fd_ = -1; }
+				int expected = fd_;
+				io_.owner_fd_.compare_exchange_strong(expected, -1);
 				::close(fd_);
 			}
-			if (directory_) { io_.directory_locked_ = false; (void)::flock(io_.directory_, LOCK_UN); }
+			if (file_) { io_.file_claimed_.store(false); }
+			if (directory_) { (void)::flock(io_.directory_, LOCK_UN); io_.directory_claimed_.store(false); }
 		}
-		void hold_directory() noexcept { directory_ = true; io_.directory_locked_ = true; }
+		bool claim_file() noexcept { file_ = !io_.file_claimed_.exchange(true); return file_; }
+		bool claim_directory() noexcept { directory_ = !io_.directory_claimed_.exchange(true); return directory_; }
 		void hold_file(int fd) noexcept { fd_ = fd; }
 		int fd() const noexcept { return fd_; }
 	private:
 		PosixIO& io_;
 		int fd_ = -1;
-		bool directory_ = false;
+		bool file_ = false, directory_ = false;
 	};
-	// The directory first, then owner.lock. A failed step unwinds what the earlier ones
-	// took, through the Owner's destructor; nothing is taken before the held checks.
+	// Claim the held flags atomically, then the directory lock, then owner.lock. A failed
+	// step unwinds only what this call claimed or took, through the Owner's destructor.
 	std::unique_ptr<OwnerLock> lock_owner(const OwnerLockOptions& options) override {
 		const bool directory = options.mode != OwnerLockMode::file;
 		const bool file = options.mode != OwnerLockMode::directory;
-		if (file && owner_fd_ >= 0) { throw std::logic_error("journal directory already owned"); }
-		if (directory && directory_locked_) { throw std::logic_error("journal directory already locked"); }
 		auto owner = control<Owner>(*this);
-		if (directory) {
-			lock_exclusive(directory_, "lock journal directory", "directories");
-			owner->hold_directory();
-		}
+		if (file && !owner->claim_file()) { throw std::logic_error("journal directory already owned"); }
+		if (directory && !owner->claim_directory()) { throw std::logic_error("journal directory already locked"); }
+		if (directory) { lock_exclusive(directory_, "lock journal directory", "directories"); }
 		if (file) {
 			const bool create = options.owner_file == OwnerFile::create_exclusive;
 			owner->hold_file(open_file("owner.lock", create));
 			lock_exclusive(owner->fd(), "lock journal owner", "files");
-			owner_fd_ = owner->fd();
-			if (create) { detail::file_sync(owner_fd_); }
+			owner_fd_.store(owner->fd());
+			if (create) { detail::file_sync(owner->fd()); }
 		}
 		return owner;
 	}
@@ -661,8 +663,9 @@ private:
 	}
 	const std::uint64_t instance_ = detail::next_posix_instance();
 	kronuz::io::completion::AllocationContext context_;
-	int directory_ = -1, owner_fd_ = -1;
-	bool directory_locked_ = false;
+	int directory_ = -1;
+	std::atomic<int> owner_fd_{-1};
+	std::atomic<bool> file_claimed_{false}, directory_claimed_{false};
 	DirectoryTrust trust_;
 	FlockCall flock_ = &::flock;
 #ifdef KRONUZ_COMPLETION_STATFS
