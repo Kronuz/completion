@@ -416,39 +416,14 @@ public:
 	PosixIO& operator=(const PosixIO&) = delete;
 	ManagedCapabilities managed_capabilities() const noexcept override { return {true, true, true, true, true, true, true, true}; }
 
+	using IO::acquire_owner;
+	// Owner locks are tried on any filesystem (see directory_filesystem to warn); destroy one
+	// before its IO. The legacy presets forward to lock_owner, the one implementation.
 	std::unique_ptr<OwnerLock> acquire_owner(bool create) override {
-		if (owner_fd_ >= 0) { throw std::logic_error("journal directory already owned"); }
-		auto owner = control<Lock>(*this, -1);
-		int fd = open_file("owner.lock", create);
-		try {
-			if (::flock(fd, LOCK_EX | LOCK_NB)) { detail::system_failure("lock journal owner"); }
-			if (create) { detail::file_sync(fd); }
-			owner->install(fd);
-			owner_fd_ = fd;
-			return owner;
-		} catch (...) { ::close(fd); throw; }
+		return acquire_owner(OwnerLockOptions::legacy_file(create));
 	}
-	// Locks this IO's directory handle, exclusive and nonblocking, while the returned lock
-	// lives. Writes nothing. Any filesystem is tried (see directory_filesystem to warn);
-	// busy is EWOULDBLOCK, as acquire_owner reports it, and a flock the filesystem does not
-	// support is errc::not_supported. Destroy the lock before the IO.
 	std::unique_ptr<OwnerLock> acquire_directory_owner() override {
-		if (directory_locked_) { throw std::logic_error("journal directory already locked"); }
-		auto owner = control<DirectoryLock>(*this);
-		int result;
-		do { result = flock_(directory_, LOCK_EX | LOCK_NB); } while (result < 0 && errno == EINTR);
-		if (result < 0) {
-			if (errno == EOPNOTSUPP || errno == ENOTSUP) {
-				std::string name = "this filesystem";
-				try { name = directory_filesystem().name; } catch (const std::system_error&) {}
-				throw std::system_error(std::make_error_code(std::errc::not_supported),
-					"directory owner lock: " + name + " does not lock directories");
-			}
-			detail::system_failure("lock journal directory");
-		}
-		owner->install();
-		directory_locked_ = true;
-		return owner;
+		return acquire_owner(OwnerLockOptions::legacy_directory());
 	}
 	// What the root was found to be at construction, for a caller to warn on.
 	DirectoryTrust directory_trust() const override { return trust_; }
@@ -466,7 +441,7 @@ public:
 #endif
 	}
 	using FlockCall = int (*)(int fd, int operation);
-	// A test seam: the flock answer acquire_directory_owner reports; null is flock.
+	// A test seam: the flock answer every owner-lock step reports; null is flock.
 	void replace_flock(FlockCall call) noexcept { flock_ = call ? call : &::flock; }
 #ifdef KRONUZ_COMPLETION_STATFS
 	using StatfsCall = int (*)(int fd, struct statfs* result);
@@ -593,26 +568,61 @@ private:
 		}
 		return *target;
 	}
-	class Lock : public OwnerLock {
+	// Holds the directory lock, owner.lock, or both; releases the file first.
+	class Owner : public OwnerLock {
 	public:
-		Lock(PosixIO& io, int fd) : io_(io), fd_(fd) {}
-		~Lock() override { if (fd_ >= 0) { io_.owner_fd_ = -1; ::close(fd_); } }
-		void install(int fd) noexcept { fd_ = fd; }
-	private:
-		PosixIO& io_;
-		int fd_;
-	};
-	class DirectoryLock : public OwnerLock {
-	public:
-		explicit DirectoryLock(PosixIO& io) : io_(io) {}
-		~DirectoryLock() override {
-			if (held_) { io_.directory_locked_ = false; (void)::flock(io_.directory_, LOCK_UN); }
+		explicit Owner(PosixIO& io) : io_(io) {}
+		~Owner() override {
+			if (fd_ >= 0) {
+				if (io_.owner_fd_ == fd_) { io_.owner_fd_ = -1; }
+				::close(fd_);
+			}
+			if (directory_) { io_.directory_locked_ = false; (void)::flock(io_.directory_, LOCK_UN); }
 		}
-		void install() noexcept { held_ = true; }
+		void hold_directory() noexcept { directory_ = true; io_.directory_locked_ = true; }
+		void hold_file(int fd) noexcept { fd_ = fd; }
+		int fd() const noexcept { return fd_; }
 	private:
 		PosixIO& io_;
-		bool held_ = false;
+		int fd_ = -1;
+		bool directory_ = false;
 	};
+	// The directory first, then owner.lock. A failed step unwinds what the earlier ones
+	// took, through the Owner's destructor; nothing is taken before the held checks.
+	std::unique_ptr<OwnerLock> lock_owner(const OwnerLockOptions& options) override {
+		const bool directory = options.mode != OwnerLockMode::file;
+		const bool file = options.mode != OwnerLockMode::directory;
+		if (file && owner_fd_ >= 0) { throw std::logic_error("journal directory already owned"); }
+		if (directory && directory_locked_) { throw std::logic_error("journal directory already locked"); }
+		auto owner = control<Owner>(*this);
+		if (directory) {
+			lock_exclusive(directory_, "lock journal directory", "directories");
+			owner->hold_directory();
+		}
+		if (file) {
+			const bool create = options.owner_file == OwnerFile::create_exclusive;
+			owner->hold_file(open_file("owner.lock", create));
+			lock_exclusive(owner->fd(), "lock journal owner", "files");
+			owner_fd_ = owner->fd();
+			if (create) { detail::file_sync(owner_fd_); }
+		}
+		return owner;
+	}
+	// Exclusive and nonblocking, retried on EINTR. Busy is EWOULDBLOCK; ENOTSUP and
+	// EOPNOTSUPP are errc::not_supported, naming the filesystem.
+	void lock_exclusive(int fd, const char* operation, const char* what) const {
+		int result;
+		do { result = flock_(fd, LOCK_EX | LOCK_NB); } while (result < 0 && errno == EINTR);
+		if (result == 0) { return; }
+		const int error = errno == EAGAIN ? EWOULDBLOCK : errno;
+		if (error == EOPNOTSUPP || error == ENOTSUP) {
+			std::string name = "this filesystem";
+			try { name = directory_filesystem().name; } catch (const std::system_error&) {}
+			throw std::system_error(std::make_error_code(std::errc::not_supported),
+				std::string(operation) + ": " + name + " does not lock " + what);
+		}
+		throw std::system_error(error, std::generic_category(), operation);
+	}
 	int open_file(std::string_view name, bool create) {
 		detail::PosixName component(name);
 		int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
