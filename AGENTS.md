@@ -9,7 +9,7 @@ change here reaches all of them.
 
 ```
 include/completion/
-  io.h                  IO, File, Mapping, OwnerLock, DirectoryCursor: the backend interfaces.
+  io.h                  IO, File, Mapping, OwnerLock(Options), DirectoryCursor: the backend interfaces.
   posix.h               PosixIO: the trusted-directory POSIX backend.
   operation.h           Requests, tokens, completions, and drive_synchronously().
   completion.h          Shared completion values and statistics.
@@ -20,7 +20,7 @@ include/completion/
   image.h               ImagePreparation and ImagePublication jobs.
   allocation.h          AllocationContext and OwnedAllocator.
   api.h                 The kronuz::io::completion entry point.
-test/                   One suite per feature (core, allocation, scan, inspection, reuse, map, ...).
+test/                   One suite per feature (core, allocation, scan, inspection, reuse, map, owner_lock, ...).
 examples/demo.cc        Batched durability across two directories.
 docs/                   PLATFORM_FINDINGS.md, MEASUREMENTS.md, completion.d2.
 ```
@@ -56,6 +56,13 @@ library's compatibility gate.
 
 ## Traps
 
+- **`file` and `directory` owner locks do not exclude each other.** They lock different
+  inodes; only `both` excludes every owner. Keep a directory under one protocol, and
+  keep `owner_lock_test`'s legacy pairing acquiring: it is the unsafe control.
+- **One owner-lock implementation.** A backend overrides `lock_owner`; its legacy
+  `acquire_owner(bool)` and `acquire_directory_owner()` forward to it, never the reverse,
+  and a mode it cannot exclude in throws `not_supported` rather than returning a lock that
+  excludes nothing.
 - **Close is never retried.** A failed close leaves the descriptor number free for
   reuse; retrying could close someone else's file.
 - **Settle cursor and file originals before closing them.** Retaining a control

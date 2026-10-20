@@ -19,9 +19,12 @@ docs, catalog, Detent replay and CI next.
   suite `completion_owner_lock` (matrix, partial failure, EINTR, unsupported, create and
   recover, aliases, lifetime through an image job, refusals). Six mutation probes (order,
   EINTR, file-only fallback, held checks, unwind, EOPNOTSUPP mapping) each fail it.
+- Docs: README (three modes, quick start on `both`, compiled), ARCHITECTURE, AGENTS
+  (two traps), PLATFORM_FINDINGS section 9.
+
 ## Next
 
-- Docs; catalog; Detent replay; journal against the branch; CI.
+- Catalog; Detent replay; journal against the branch; CI.
 
 ## Blocked on
 

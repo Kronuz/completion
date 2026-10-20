@@ -56,9 +56,12 @@ Write a file and make it durable through the trusted-directory backend:
 
 #include <string_view>
 
+namespace j = kronuz::journal;
+
 int main() {
-	kronuz::journal::PosixIO io("data");          // an existing private directory
-	auto owner = io.acquire_owner(true);           // exclusive across processes
+	j::PosixIO io("data");                         // an existing private directory
+	// Exclusive across processes: the directory, then owner.lock, created once.
+	auto owner = io.acquire_owner(j::OwnerLockOptions{j::OwnerLockMode::both, j::OwnerFile::create_exclusive});
 	auto file = io.create_exclusive("record");
 	std::string_view bytes = "durable bytes\n";
 	for (std::size_t at = 0; at < bytes.size();) {
@@ -71,11 +74,19 @@ int main() {
 }
 ```
 
-`io.acquire_directory_owner()` takes the same exclusive lock on the directory handle
-itself, with no lock file, on any filesystem. `io.directory_filesystem()` reports whether
-the filesystem is known local (`local`, plus its `name`), so a host can warn before it
-relies on the lock over NFS, SMB, or the like; a filesystem whose `flock` is unsupported
-fails with `std::errc::not_supported`, and the host decides whether to run unlocked.
+The owner lock has three modes. `both` (the default) locks the directory handle and then
+`owner.lock`, and excludes an owner in any mode. `file` and `directory` are what the
+legacy `io.acquire_owner(bool)` and `io.acquire_directory_owner()` take: they lock
+different inodes, so a file-only owner and a directory-only owner do not exclude each
+other. Recovery opens the existing `owner.lock` (`OwnerFile::open_existing`, the default);
+a directory-only lock writes nothing. Busy is `EWOULDBLOCK` in every mode. Pass the
+options by name: `io.acquire_owner({})` selects the bool overload.
+
+Locks are tried on any filesystem. `io.directory_filesystem()` reports whether it is known
+local (`local`, plus its `name`), so a host can warn before it relies on the lock over NFS,
+SMB, or the like. A `flock` the filesystem does not support fails with
+`std::errc::not_supported` in every mode that needs it, with no fallback to another mode;
+the host decides whether to run unlocked.
 
 By default `PosixIO` refuses a root that is a symlink, is owned by another user, or is
 writable by group or others. `PosixIOOptions` relaxes that, for a host that would rather warn:

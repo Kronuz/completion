@@ -142,8 +142,8 @@ probed a directory `flock` and a directory-descriptor `F_FULLFSYNC` on macOS 15 
   lock (`flock(2)`). A directory cannot be opened for writing, so a directory lock there
   either fails or excludes no other client, and the call cannot tell which.
 
-**In this library:** `IO::acquire_directory_owner()`, implemented by `PosixIO`, locks on
-any filesystem: the owner's ruling is that a user who runs on a network filesystem
+**In this library:** the directory lock (`OwnerLockMode::directory` and `both`, and the
+legacy `IO::acquire_directory_owner()`; section 9) locks on any filesystem: the owner's ruling is that a user who runs on a network filesystem
 gambles knowingly, so the library warns through the caller and does not refuse. A `flock`
 reported unsupported throws `std::errc::not_supported`. `PosixIO::directory_filesystem()`
 classifies the filesystem for that warning: `MNT_LOCAL` on macOS and the BSDs (FUSE
@@ -176,3 +176,31 @@ group/other-writable mode; the defaults refuse as before (Detent links this libr
 
 **For a consumer:** construct the `PosixIO` with both options, read `directory_trust()`,
 and warn on `foreign_owner` or `shared_writable`; a symlinked root alone needs no warning.
+
+## 9. Two owner locks that do not exclude each other
+
+The consolidation audit (`cpp-libraries/docs/reviews/consolidation-2026-10-19.md`, CL-2)
+held `acquire_owner(true)` in one `PosixIO` and `acquire_directory_owner()` in another on
+one APFS directory, and both succeeded: `flock` excludes per inode, and `owner.lock` and
+the directory are different inodes. Detent used the first and strata the second.
+
+- `owner_lock_test` runs every pairing of `file`, `directory` and `both`, through the
+  legacy and options calls, in both orders, across processes and through distinct and
+  shared IO objects (25 pairings each). The legacy file/directory pairing acquires in all
+  three (8 of 25, the unsafe control); the other 17 exclude. CI runs it on macOS, Linux
+  and FreeBSD.
+- macOS has distinct `ENOTSUP` (45) and `EOPNOTSUPP` (102); Linux defines them equal. Both
+  map to `std::errc::not_supported`, which is `ENOTSUP`.
+- A new call does not repair binaries already running: an old file-only process and an
+  old directory-only process still do not exclude each other.
+
+**In this library:** `IO::acquire_owner(OwnerLockOptions)` with `OwnerLockMode::both` takes
+the directory lock, then `owner.lock`, and releases in reverse; a `both` contender against
+a directory-only holder stops before opening or creating `owner.lock`, so it writes
+nothing. An unsupported directory lock fails closed in `both`, so a filesystem where
+`owner.lock` locked but the directory does not now refuses.
+
+**For a consumer:** move mutable owners to `both`, and qualify the directory lock on each
+deployment filesystem first. Until every process that can address a directory takes the
+same protocol, keep it under one protocol: a directory-only owner is safe only where no
+file-only owner can ever reach the directory, including during creation.
