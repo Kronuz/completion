@@ -9,9 +9,10 @@ Catalog: cpp-libraries branch `cl-2-owner-lock`, worktree
 
 ## State
 
-Code review (`docs/reviews/cl-2-code.md`, REJECT on CL2-1) folded in; ready for the scoped
-re-check. Not merged. Completion CI for the review fixes: see the run id at the end of
-this section's Done list. Earlier green run 39380284199 was at 91d62cb.
+Code review (`docs/reviews/cl-2-code.md`, REJECT on CL2-1) folded in at 9ed8efa; ready for
+the scoped re-check. Not merged. CI run 39387877593 (workflow_dispatch at 9ed8efa) was
+queued when this was written; the lead watches it. Earlier green run 39380284199 was at
+91d62cb.
 
 ## Done
 
