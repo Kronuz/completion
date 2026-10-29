@@ -129,6 +129,21 @@ inline EntryInspection inspect_status(const struct stat& status) {
 		static_cast<std::uint64_t>(status.st_uid), static_cast<std::uint64_t>(status.st_nlink),
 		static_cast<std::uint32_t>(status.st_mode & 07777)};
 }
+#ifdef __APPLE__
+struct DeviceSyncCalls {
+	int stat(int fd, struct stat* status) const { return ::fstat(fd, status); }
+	int sync(int fd) const { return ::fsync(fd); }
+	int full_sync(int fd) const { return ::fcntl(fd, F_FULLFSYNC); }
+	// F_BARRIERFSYNC where the filesystem has it; else the stronger full flush.
+	int barrier(int fd) const {
+		int result;
+		do { result = ::fcntl(fd, F_BARRIERFSYNC); } while (result < 0 && errno == EINTR);
+		if (result >= 0) { return result; }
+		do { result = full_sync(fd); } while (result < 0 && errno == EINTR);
+		return result;
+	}
+};
+#endif
 inline void file_sync(int fd) {
 	int result;
 #ifdef __APPLE__
@@ -137,6 +152,15 @@ inline void file_sync(int fd) {
 	do { result = ::fsync(fd); } while (result < 0 && errno == EINTR);
 #endif
 	if (result < 0) { system_failure("durably sync journal file"); }
+}
+// F_BARRIERFSYNC on macOS where the filesystem has it (else the full flush); fsync elsewhere.
+inline void file_sync_ordered(int fd) {
+#ifdef __APPLE__
+	DeviceSyncCalls calls;
+	if (calls.barrier(fd) < 0) { system_failure("order journal file"); }
+#else
+	file_sync(fd);
+#endif
 }
 // fdatasync on Linux; F_FULLFSYNC on macOS, whose fdatasync leaves data in the drive's
 // cache; fsync elsewhere.
@@ -200,19 +224,6 @@ template <class Calls> inline void files_sync_devices(std::span<const int> fds, 
 template <class Calls> inline void files_sync_devices(std::span<const int> fds, Calls& calls) {
 	files_sync_devices(fds, -1, -1, SyncMode::durable, calls);
 }
-#ifdef __APPLE__
-struct DeviceSyncCalls {
-	int stat(int fd, struct stat* status) const { return ::fstat(fd, status); }
-	int sync(int fd) const { return ::fsync(fd); }
-	int full_sync(int fd) const { return ::fcntl(fd, F_FULLFSYNC); }
-	// F_BARRIERFSYNC where the filesystem has it; else the stronger full flush.
-	int barrier(int fd) const {
-		int result;
-		do { result = ::fcntl(fd, F_BARRIERFSYNC); } while (result < 0 && errno == EINTR);
-		return result < 0 ? full_sync(fd) : result;
-	}
-};
-#endif
 // macOS stages every file before flushing each distinct device; Linux starts writeback
 // on every file before the first fsync waits.
 inline void files_sync(std::span<const int> fds) {
@@ -342,6 +353,7 @@ public:
 		if (result < 0) { system_failure("truncate journal tail"); }
 	}
 	void sync() override { file_sync(fd_); }
+	void sync_ordered() override { file_sync_ordered(fd_); }
 	void sync_data() override { file_sync_data(fd_); }
 	EntryInspection inspect() override {
 		struct stat status{};
