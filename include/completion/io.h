@@ -82,10 +82,6 @@ public:
 	// Makes written bytes durable, with the metadata needed to read them back; other
 	// metadata (times) may lag. For preallocated files, where no write changes the size.
 	virtual void sync_data() { sync(); }
-	// Orders the file's written bytes ahead of every later write on its device (a following
-	// replace(), say) without waiting for them to reach stable storage: the next
-	// IO::sync_directory() makes them durable. A backend without an ordering-only barrier syncs.
-	virtual void sync_ordered() { sync(); }
 	virtual EntryInspection inspect() { throw std::logic_error("held-file inspection unsupported"); }
 	// Fresh handles only: converting a shared lock may release its protection.
 	// False means busy, never a blocking wait. Errors remain exceptional.

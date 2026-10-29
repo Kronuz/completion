@@ -153,15 +153,6 @@ inline void file_sync(int fd) {
 #endif
 	if (result < 0) { system_failure("durably sync journal file"); }
 }
-// F_BARRIERFSYNC on macOS where the filesystem has it (else the full flush); fsync elsewhere.
-inline void file_sync_ordered(int fd) {
-#ifdef __APPLE__
-	DeviceSyncCalls calls;
-	if (calls.barrier(fd) < 0) { system_failure("order journal file"); }
-#else
-	file_sync(fd);
-#endif
-}
 // fdatasync on Linux; F_FULLFSYNC on macOS, whose fdatasync leaves data in the drive's
 // cache; fsync elsewhere.
 inline void file_sync_data(int fd) {
@@ -353,7 +344,6 @@ public:
 		if (result < 0) { system_failure("truncate journal tail"); }
 	}
 	void sync() override { file_sync(fd_); }
-	void sync_ordered() override { file_sync_ordered(fd_); }
 	void sync_data() override { file_sync_data(fd_); }
 	EntryInspection inspect() override {
 		struct stat status{};

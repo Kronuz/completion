@@ -51,11 +51,43 @@ manifest rename, a checkpoint publication, a snapshot install), write them all, 
 example, "this file is written") until the batch returns: a failure part-way leaves no
 way to know which files are durable, so the next attempt must write them again.
 
-**Not yet done:** the directory barrier on macOS is `fsync(dir)` plus its own
-`F_FULLFSYNC`, so a commit still pays about four device flushes (data batch, directory,
-manifest temporary, directory). Folding the first directory barrier into the batch, and
-an ordering-only barrier (`F_BARRIERFSYNC`, measured at 10.7 ms for the same 9 files
-plus the final directory flush) for the manifest temporary, are the next candidates.
+### Fewer flushes per commit: `sync_files_and_directory` and `order_files_and_directory`
+
+A commit that publishes a manifest by rename paid about four device flushes on macOS: the data batch, the
+directory, the manifest temporary, and the directory after the rename. Two additive calls remove up to three.
+The ordering argument is per barrier:
+
+1. **Directory folded into the data batch** (`sync_files_and_directory`). The directory's `fsync` joins the files'
+   before the one flush, so when it returns the bytes and the directory entries are on the media, which is all the
+   second flush added. Nothing depends on the state between the two flushes.
+2. **Manifest temporary ordered, not flushed** (`order_files_and_directory`, one ordering point). `F_BARRIERFSYNC`
+   guarantees that I/O `fsync`'d on the device before it persists before any I/O issued after it (`fcntl(2)`).
+   The data files, the directory and the temporary are all `fsync`'d before the barrier and the rename is issued
+   after it, so a manifest that is visible after power loss is complete and every file it names is on the media.
+   The directory flush after the rename (`fsync` plus `F_FULLFSYNC`) is unchanged: it is the acknowledgement point
+   and flushes everything. A file on a device other than the directory's is flushed in full inside the call.
+
+Probe (`commit_probe.cc`, one commit shape per pattern: 3 or 9 files of 200 KB, a manifest temporary, a rename;
+30 interleaved rounds, median, macOS x86_64 APFS, `quiet exclusive`):
+
+| Pattern | Device flushes | 3 files | 9 files |
+|---|---|---:|---:|
+| Before | 4 full | 85.7 ms | 89.6 ms |
+| Directory folded in | 3 full | 63.9 ms | 68.9 ms |
+| Temporary ordered | 2 full, 1 barrier | 45.1 ms | 48.9 ms |
+| One ordering point | 1 full, 1 barrier | 24.9 ms | 27.9 ms |
+
+Strata's T11 bulk load (20000 documents, five interleaved rounds): wall time 3.39 s to 2.90 s (docs/s 5897 to 6898,
+17% more), and the profile's engine row, which counts the flush wait as busy, falls 0.205 to 0.163 ms per document
+(see the Xapiand note `docs/perf/t11-barriers/README.md`). Whole-process CPU per document is unchanged within noise
+(0.818 to 0.809 ms): what is saved is waiting, not computation.
+
+**Other platforms.** Linux and FreeBSD are unchanged: both calls run `sync_files` then `sync_directory` there, so they do not
+help and cost nothing; no ordering-only call was tried on them. arm64 macOS is not measured. The barrier is only as strong as the drive's honoring of it, as a full flush is.
+
+**For a consumer:** publish with `write files; order_files_and_directory(files + temporary); replace; sync_directory`.
+Do not flip in-memory state until `sync_directory` returns. Use `sync_files_and_directory` where no rename follows.
+
 
 ## 2. Freeing large files costs 7–130 ms per GiB and disturbs other I/O
 
