@@ -149,36 +149,68 @@ inline void file_sync_data(int fd) {
 	file_sync(fd);
 #endif
 }
-template <class Calls> inline void files_sync_devices(std::span<const int> fds, Calls& calls) {
-	if (fds.empty()) { return; }
-	struct DeviceFile { dev_t device; int fd; };
+// How files_sync_devices leaves the device: durable (a full flush per distinct device), or
+// ordered on the directory's device (see PosixIO::order_files_and_directory).
+enum class SyncMode { durable, ordered };
+// Stages every file (and `directory`, when >= 0) with fsync, then flushes each distinct
+// device once. Ordered mode issues a barrier, not a full flush, on the directory's device;
+// every other device is still flushed in full.
+// `directory_flush` is the descriptor a flush of the directory's device goes through when
+// no file shares it (the owner file when held, else the directory).
+template <class Calls> inline void files_sync_devices(std::span<const int> fds, int directory, int directory_flush, SyncMode mode, Calls& calls) {
+	if (fds.empty() && directory < 0) { return; }
+	struct DeviceFile { dev_t device; int fd; bool directory; };
 	std::vector<DeviceFile> devices;
-	devices.reserve(fds.size());
-	for (int fd : fds) {
+	devices.reserve(fds.size() + 1);
+	auto discover = [&](int fd, int flush_fd, bool is_directory) {
 		struct stat status{};
 		int result;
 		do { result = calls.stat(fd, &status); } while (result < 0 && errno == EINTR);
 		if (result < 0) { system_failure("stat journal file"); }
-		devices.push_back({status.st_dev, fd});
-	}
-	std::sort(devices.begin(), devices.end(), [](const DeviceFile& a, const DeviceFile& b) { return a.device < b.device; });
+		devices.push_back({status.st_dev, flush_fd, is_directory});
+	};
+	for (int fd : fds) { discover(fd, fd, false); }
+	if (directory >= 0) { discover(directory, directory_flush, true); }
+	// Files stay ahead of the directory within a device, so a flush goes through a file.
+	std::stable_sort(devices.begin(), devices.end(), [](const DeviceFile& a, const DeviceFile& b) { return a.device < b.device; });
 	for (int fd : fds) {
 		int result;
 		do { result = calls.sync(fd); } while (result < 0 && errno == EINTR);
 		if (result < 0) { system_failure("sync journal file"); }
 	}
+	if (directory >= 0) {
+		int result;
+		do { result = calls.sync(directory); } while (result < 0 && errno == EINTR);
+		if (result < 0) { system_failure("sync journal directory"); }
+	}
 	for (std::size_t i = 0; i < devices.size(); ++i) {
 		if (i && devices[i].device == devices[i - 1].device) { continue; }
+		bool holds_directory = false;
+		for (std::size_t j = i; j < devices.size() && devices[j].device == devices[i].device; ++j) { holds_directory |= devices[j].directory; }
 		int result;
-		do { result = calls.full_sync(devices[i].fd); } while (result < 0 && errno == EINTR);
-		if (result < 0) { system_failure("durably sync journal file"); }
+		if (mode == SyncMode::ordered && holds_directory) {
+			do { result = calls.barrier(devices[i].fd); } while (result < 0 && errno == EINTR);
+			if (result < 0) { system_failure("order journal files"); }
+		} else {
+			do { result = calls.full_sync(devices[i].fd); } while (result < 0 && errno == EINTR);
+			if (result < 0) { system_failure("durably sync journal file"); }
+		}
 	}
+}
+template <class Calls> inline void files_sync_devices(std::span<const int> fds, Calls& calls) {
+	files_sync_devices(fds, -1, -1, SyncMode::durable, calls);
 }
 #ifdef __APPLE__
 struct DeviceSyncCalls {
 	int stat(int fd, struct stat* status) const { return ::fstat(fd, status); }
 	int sync(int fd) const { return ::fsync(fd); }
 	int full_sync(int fd) const { return ::fcntl(fd, F_FULLFSYNC); }
+	// F_BARRIERFSYNC where the filesystem has it; else the stronger full flush.
+	int barrier(int fd) const {
+		int result;
+		do { result = ::fcntl(fd, F_BARRIERFSYNC); } while (result < 0 && errno == EINTR);
+		return result < 0 ? full_sync(fd) : result;
+	}
 };
 #endif
 // macOS stages every file before flushing each distinct device; Linux starts writeback
@@ -531,6 +563,15 @@ public:
 		}
 		detail::files_sync(fds);
 	}
+	// macOS: one device flush shared by the files and the directory entries.
+	void sync_files_and_directory(std::span<File* const> files) override {
+#ifdef __APPLE__
+		sync_staged(files, detail::SyncMode::durable);
+#else
+		sync_files(files);
+		sync_directory();
+#endif
+	}
 	void sync_directory() override {
 		int result;
 		do { result = ::fsync(directory_); } while (result < 0 && errno == EINTR);
@@ -544,6 +585,23 @@ public:
 	}
 
 private:
+#ifdef __APPLE__
+	void sync_staged(std::span<File* const> files, detail::SyncMode mode) {
+		std::vector<int> fds;
+		fds.reserve(files.size());
+		for (auto* file : files) {
+			if (auto* posix = dynamic_cast<detail::PosixFile*>(file)) {
+				fds.push_back(posix->native_handle());
+			} else {
+				file->sync();
+			}
+		}
+		if (fds.empty() && mode == detail::SyncMode::durable) { sync_directory(); return; }
+		const int owner = owner_fd_.load();
+		detail::DeviceSyncCalls calls;
+		detail::files_sync_devices(fds, directory_, owner >= 0 ? owner : directory_, mode, calls);
+	}
+#endif
 	class ReusableFile : public detail::PosixFile {
 	public:
 		explicit ReusableFile(const PosixIO& io) : detail::PosixFile(-1), owner(io.instance_) {}

@@ -225,6 +225,13 @@ public:
 	virtual void sync_files(std::span<File* const> files) {
 		for (auto* file : files) { file->sync(); }
 	}
+	// Makes every file durable and the directory's entries durable (creations, replacements and
+	// removals so far), as sync_files(files) then sync_directory() would; a backend may share
+	// one device flush among them. After a failure, which are durable is unspecified.
+	virtual void sync_files_and_directory(std::span<File* const> files) {
+		sync_files(files);
+		sync_directory();
+	}
 
 protected:
 	// The one owner-lock implementation, given validated options. A backend that cannot
