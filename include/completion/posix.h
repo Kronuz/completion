@@ -130,15 +130,26 @@ inline EntryInspection inspect_status(const struct stat& status) {
 		static_cast<std::uint32_t>(status.st_mode & 07777)};
 }
 #ifdef __APPLE__
+// The sync system calls (fsync and fcntl) PosixIO issues; a test replaces them through
+// PosixIO::replace_sync_calls to record the real call sequence.
+using FsyncCall = int (*)(int fd);
+using FcntlCall = int (*)(int fd, int command);
+inline int default_fcntl(int fd, int command) { return ::fcntl(fd, command); }
+// Errors a filesystem without F_BARRIERFSYNC returns: the vnode default is ENOTSUP and an
+// unrecognised command is ENOTTY (ENOTTY observed on APFS, FAT and exFAT volumes).
+inline bool barrier_unsupported(int error) { return error == ENOTSUP || error == EOPNOTSUPP || error == ENOTTY; }
 struct DeviceSyncCalls {
+	FsyncCall fsync_call = &::fsync;
+	FcntlCall fcntl_call = &default_fcntl;
 	int stat(int fd, struct stat* status) const { return ::fstat(fd, status); }
-	int sync(int fd) const { return ::fsync(fd); }
-	int full_sync(int fd) const { return ::fcntl(fd, F_FULLFSYNC); }
-	// F_BARRIERFSYNC where the filesystem has it; else the stronger full flush.
+	int sync(int fd) const { return fsync_call(fd); }
+	int full_sync(int fd) const { return fcntl_call(fd, F_FULLFSYNC); }
+	// F_BARRIERFSYNC; the stronger full flush only where the filesystem lacks the call. Any
+	// other error (EIO, ...) is the barrier's own failure and is returned, never retried.
 	int barrier(int fd) const {
 		int result;
-		do { result = ::fcntl(fd, F_BARRIERFSYNC); } while (result < 0 && errno == EINTR);
-		if (result >= 0) { return result; }
+		do { result = fcntl_call(fd, F_BARRIERFSYNC); } while (result < 0 && errno == EINTR);
+		if (result >= 0 || !barrier_unsupported(errno)) { return result; }
 		do { result = full_sync(fd); } while (result < 0 && errno == EINTR);
 		return result;
 	}
@@ -404,6 +415,10 @@ private:
 struct PosixIOOptions {
 	bool follow_root_symlink = false;     // open through a final-component symlink; the descriptor is then held
 	bool allow_shared_directory = false;  // admit a foreign owner and group/other-writable mode
+	// macOS: order_files_and_directory flushes in full (F_FULLFSYNC) instead of issuing
+	// F_BARRIERFSYNC, whose ordering Apple guarantees only on Apple SSDs. Other platforms
+	// already flush in full.
+	bool full_flush_ordering = false;
 };
 
 class PosixIO final : public IO {
@@ -416,7 +431,7 @@ public:
 		: PosixIO(kronuz::io::completion::AllocationContext{}, directory, artifact_mode, options) {}
 	PosixIO(kronuz::io::completion::AllocationContext context, const std::filesystem::path& directory,
 		unsigned artifact_mode = 0600, PosixIOOptions options = {})
-		: context_(std::move(context)), artifact_mode_(artifact_mode) {
+		: context_(std::move(context)), artifact_mode_(artifact_mode), full_flush_ordering_(options.full_flush_ordering) {
 		if (artifact_mode != 0600 && artifact_mode != 0640 && artifact_mode != 0644) {
 			throw std::invalid_argument("unsupported artifact permissions");
 		}
@@ -477,6 +492,14 @@ public:
 	using FlockCall = int (*)(int fd, int operation);
 	// A test seam: the flock answer every owner-lock step reports; null is flock.
 	void replace_flock(FlockCall call) noexcept { flock_ = call ? call : &::flock; }
+#ifdef __APPLE__
+	// A test seam: the fsync and fcntl (F_FULLFSYNC, F_BARRIERFSYNC) calls the sync paths
+	// issue; null is the system call. Call before any sync.
+	void replace_sync_calls(detail::FsyncCall fsync_call, detail::FcntlCall fcntl_call) noexcept {
+		sync_calls_.fsync_call = fsync_call ? fsync_call : &::fsync;
+		sync_calls_.fcntl_call = fcntl_call ? fcntl_call : &detail::default_fcntl;
+	}
+#endif
 #ifdef KRONUZ_COMPLETION_STATFS
 	using StatfsCall = int (*)(int fd, struct statfs* result);
 	// A test seam: the filesystem answer directory_filesystem classifies; null is fstatfs.
@@ -563,7 +586,11 @@ public:
 				file->sync();
 			}
 		}
+#ifdef __APPLE__
+		if (!fds.empty()) { detail::files_sync_devices(fds, sync_calls_); }
+#else
 		detail::files_sync(fds);
+#endif
 	}
 	// macOS: one device flush shared by the files and the directory entries.
 	void sync_files_and_directory(std::span<File* const> files) override {
@@ -576,22 +603,28 @@ public:
 	}
 	// macOS: fsync everything, then one barrier on the directory's device (full flushes on any
 	// other device the files sit on); the sync_directory that follows the publication flushes.
+	// With PosixIOOptions::full_flush_ordering the barrier is a full flush.
 	void order_files_and_directory(std::span<File* const> files) override {
 #ifdef __APPLE__
-		sync_staged(files, detail::SyncMode::ordered);
+		sync_staged(files, full_flush_ordering_ ? detail::SyncMode::durable : detail::SyncMode::ordered);
 #else
 		sync_files_and_directory(files);
 #endif
 	}
 	void sync_directory() override {
 		int result;
+#ifdef __APPLE__
+		do { result = sync_calls_.sync(directory_); } while (result < 0 && errno == EINTR);
+#else
 		do { result = ::fsync(directory_); } while (result < 0 && errno == EINTR);
+#endif
 		if (result < 0) { detail::system_failure("sync journal directory"); }
 #ifdef __APPLE__
 		// Directory fsync establishes namespace ordering; fullsync then asks the storage
 		// device to flush its cache, through the owner file when held, else the directory.
-		// Unsupported barriers fail closed.
-		{ const int owner = owner_fd_.load(); detail::file_sync(owner >= 0 ? owner : directory_); }
+		const int owner = owner_fd_.load();
+		do { result = sync_calls_.full_sync(owner >= 0 ? owner : directory_); } while (result < 0 && errno == EINTR);
+		if (result < 0) { detail::system_failure("durably sync journal file"); }
 #endif
 	}
 
@@ -609,8 +642,7 @@ private:
 		}
 		if (fds.empty() && mode == detail::SyncMode::durable) { sync_directory(); return; }
 		const int owner = owner_fd_.load();
-		detail::DeviceSyncCalls calls;
-		detail::files_sync_devices(fds, directory_, owner >= 0 ? owner : directory_, mode, calls);
+		detail::files_sync_devices(fds, directory_, owner >= 0 ? owner : directory_, mode, sync_calls_);
 	}
 #endif
 	class ReusableFile : public detail::PosixFile {
@@ -737,11 +769,15 @@ private:
 	std::atomic<bool> file_claimed_{false}, directory_claimed_{false};
 	DirectoryTrust trust_;
 	FlockCall flock_ = &::flock;
+#ifdef __APPLE__
+	detail::DeviceSyncCalls sync_calls_;
+#endif
 #ifdef KRONUZ_COMPLETION_STATFS
 	StatfsCall statfs_ = nullptr;
 #endif
 	dev_t device_{};
 	unsigned artifact_mode_ = 0600;
+	bool full_flush_ordering_ = false;
 };
 
 inline std::shared_ptr<PosixIO> make_posix_io(kronuz::io::completion::AllocationContext context,

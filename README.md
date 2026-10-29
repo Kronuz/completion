@@ -27,7 +27,10 @@ write. The storage layer under [journal](https://github.com/Kronuz/journal) and
   root itself is trusted by default only when it is owned and private; two options let a
   host proceed and warn instead.
 - **Durability done right.** `F_FULLFSYNC` on macOS, batched `sync_files` across
-  devices, and separate file and directory barriers.
+  devices, and separate file and directory barriers. `order_files_and_directory` orders
+  a publication with `F_BARRIERFSYNC` on macOS, which is not a flush and which Apple
+  guarantees only on Apple SSDs; `PosixIOOptions::full_flush_ordering` makes it a full
+  flush.
 - **Zero-copy reads.** `File::map()` gives a read-only view of a whole file.
 - **Allocation-aware.** Optional PMR contexts account every control block,
   queue, and name, so a service can admit its memory up front.

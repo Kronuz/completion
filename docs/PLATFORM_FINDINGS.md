@@ -83,7 +83,24 @@ Strata's T11 bulk load (20000 documents, five interleaved rounds): wall time 3.3
 (0.818 to 0.809 ms): what is saved is waiting, not computation.
 
 **Other platforms.** Linux and FreeBSD are unchanged: both calls run `sync_files` then `sync_directory` there, so they do not
-help and cost nothing; no ordering-only call was tried on them. arm64 macOS is not measured. The barrier is only as strong as the drive's honoring of it, as a full flush is.
+help and cost nothing; no ordering-only call was tried on them. arm64 macOS is not measured.
+
+**What the barrier guarantees.** `fcntl(2)` documents `F_BARRIERFSYNC` as ordering only: I/O `fsync`'d before it
+persists before I/O issued after it, and "no assumption should be made on what has been persisted or not when this
+call returns". It is not a flush. Apple documents it as "implemented on HFS and APFS" and requiring "hardware
+support, which Apple SSDs are guaranteed to provide". `F_FULLFSYNC` is documented for any drive that honors a cache
+flush. So the ordering holds on an internal Apple SSD; on external or third-party drives, Fusion or AppleRAID sets
+and virtual disks, what APFS does with the call is undocumented, and if it degrades to a plain `fsync` a power loss
+can leave a visible manifest whose files are not on the media (strata then refuses to open the index rather than
+serving wrong data; acknowledged commits stay durable through the final `F_FULLFSYNC`). Hosts that cannot vouch for
+their storage set `PosixIOOptions::full_flush_ordering`: `order_files_and_directory` then issues `F_FULLFSYNC`
+where it would issue the barrier. The default stays the barrier.
+
+**Barrier errors.** The barrier falls back to `F_FULLFSYNC` only when the filesystem lacks the call (`ENOTSUP`,
+`EOPNOTSUPP`, `ENOTTY`; an unrecognised `fcntl` command returns `ENOTTY` on macOS, and FAT and exFAT volumes accept
+the barrier). Any other error, `EIO` among them, fails the call, as a failed flush does. `EINVAL` is not treated as
+unsupported: Apple documents no such use. `test/sync_calls_test.cc` records the real `fsync` and `fcntl` sequence
+through `PosixIO::replace_sync_calls` and asserts the protocol and these rules.
 
 **For a consumer:** publish with `write files; order_files_and_directory(files + temporary); replace; sync_directory`.
 Do not flip in-memory state until `sync_directory` returns. Use `sync_files_and_directory` where no rename follows.
