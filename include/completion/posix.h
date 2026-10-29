@@ -584,6 +584,15 @@ public:
 		sync_directory();
 #endif
 	}
+	// macOS: fsync everything, then one barrier on the directory's device (full flushes on any
+	// other device the files sit on); the sync_directory that follows the publication flushes.
+	void order_files_and_directory(std::span<File* const> files) override {
+#ifdef __APPLE__
+		sync_staged(files, detail::SyncMode::ordered);
+#else
+		sync_files_and_directory(files);
+#endif
+	}
 	void sync_directory() override {
 		int result;
 		do { result = ::fsync(directory_); } while (result < 0 && errno == EINTR);

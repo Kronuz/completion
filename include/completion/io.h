@@ -236,6 +236,12 @@ public:
 		sync_files(files);
 		sync_directory();
 	}
+	// An ordering point before a publication. On return the files' bytes and the directory's
+	// entries so far (creations, replacements and removals) are staged ahead of every write issued
+	// after the call: a replace() made next cannot reach stable storage without them. They are
+	// not necessarily durable on return; the next sync_directory() makes them, and everything
+	// after, durable. A backend without an ordering-only barrier makes them durable here.
+	virtual void order_files_and_directory(std::span<File* const> files) { sync_files_and_directory(files); }
 
 protected:
 	// The one owner-lock implementation, given validated options. A backend that cannot
