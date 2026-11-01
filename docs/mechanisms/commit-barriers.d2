@@ -1,8 +1,33 @@
-vars: { d2-config: { layout-engine: elk; theme-id: 302; sketch: true; pad: 24 } }
-direction: right
+vars: { d2-config: { layout-engine: elk; theme-id: 302; sketch: true; pad: 24; theme-overrides: { B1: "#8C7B7E"; B2: "#C25B73"; N2: "#C25B73" } } }
+style.fill: transparent
 
-a: "write files\nand manifest.tmp" { style.fill: "#F4F1EA" }
-b: "order_files_and_directory\nfsync files and directory,\none F_BARRIERFSYNC" { style.fill: "#F4F1EA" }
-c: "replace\ntmp to manifest-N" { style.fill: "#F4F1EA" }
-d: "sync_directory\nfsync, then F_FULLFSYNC\n(acknowledged)" { style.fill: "#FBE3C8" }
+grid-rows: 2
+grid-columns: 2
+horizontal-gap: 120
+vertical-gap: 80
+
+a: {
+  width: 300
+  height: 130
+  label: "write files\nand manifest.tmp"
+  style.fill: "#F4F1EA"
+}
+b: {
+  width: 300
+  height: 130
+  label: "order_files_and_directory\nfsync files and directory,\none F_BARRIERFSYNC"
+  style.fill: "#F4F1EA"
+}
+c: {
+  width: 300
+  height: 130
+  label: "replace\ntmp to manifest-N"
+  style.fill: "#F4F1EA"
+}
+d: {
+  width: 300
+  height: 130
+  label: "sync_directory\nfsync, then F_FULLFSYNC\n(acknowledged)"
+  style.fill: "#FBE3C8"
+}
 a -> b -> c -> d
