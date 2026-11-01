@@ -22,7 +22,7 @@ include/completion/
   api.h                 The kronuz::io::completion entry point.
 test/                   One suite per feature (core, allocation, scan, inspection, reuse, map, owner_lock, ...).
 examples/demo.cc        Batched durability across two directories.
-docs/                   PLATFORM_FINDINGS.md, MEASUREMENTS.md, completion.d2.
+docs/                   PLATFORM_FINDINGS.md, MEASUREMENTS.md, mechanisms/, completion.d2 (the README diagram's source).
 ```
 
 ## Verify a change
