@@ -14,6 +14,9 @@ entries are dated.
 - `tools/mutants.py`: the 14 owner-lock mutants of the CL-2 review (CL2-5) as exact-anchor
   replacements. Each is applied to a scratch copy, rebuilt and run against the suite. The CTest
   test `completion_mutants_anchors` checks the anchors; the `mutants` workflow runs the script.
+- `completion_sync_calls` asserts which descriptor the publication's full flush goes through on
+  macOS (the owner file while it is held, the directory after it is released). Mutant `m14`
+  (`owner_fd_` unrecorded) survived the suite until it did.
 
 ## 2026-10-30
 

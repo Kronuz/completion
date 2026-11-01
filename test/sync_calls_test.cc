@@ -48,6 +48,7 @@ Log calls;
 int barrier_error = 0;   // fails the next barriers with this errno
 int barrier_failures = 0;
 int full_error = 0;      // fails the next full flush with this errno
+std::string full_target; // the name behind the descriptor of the last full flush
 
 std::string name_of(int fd) {
 	char path[1024] = {};
@@ -66,6 +67,7 @@ int record_fcntl(int fd, int command) {
 	}
 	check(command == F_FULLFSYNC, "only F_BARRIERFSYNC and F_FULLFSYNC are issued");
 	calls.push_back("full");
+	full_target = name_of(fd);
 	if (full_error) { errno = full_error; return -1; }
 	return ::fcntl(fd, command);
 }
@@ -144,6 +146,16 @@ void ordering_protocol(const std::filesystem::path& base) {
 	check(foreign_log == Log{"foreign"}, "a foreign file syncs itself once");
 }
 
+// The publication's flush goes through the owner file while one is held, and through the directory otherwise.
+void flush_target(const std::filesystem::path& base) {
+	Fixture f(base / "flush-target", {});
+	run([&] { f.io->sync_directory(); });
+	check(full_target == "owner.lock", "sync_directory flushes through the owner file while it is held");
+	f.owner.reset();
+	run([&] { f.io->sync_directory(); });
+	check(full_target == f.dir(), "sync_directory flushes through the directory once the owner file is released");
+}
+
 void errno_rule(const std::filesystem::path& base) {
 	Fixture f(base / "errno-rule", {});
 	for (int error : {EIO, ENOSPC, EDQUOT, EINVAL, EBADF}) {
@@ -190,6 +202,7 @@ int main(int argc, char **argv) {
 	std::filesystem::remove_all(base);
 	std::filesystem::create_directory(base);
 	ordering_protocol(base);
+	flush_target(base);
 	errno_rule(base);
 	full_flush_option(base);
 	std::cout << "sync_calls: ok\n";
