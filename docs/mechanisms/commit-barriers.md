@@ -35,7 +35,7 @@ The owner ruled on 2026-10-29 that non-Apple storage keeps the barrier with a wa
 
 ## Numbers
 
-Probe `commit_probe.cc`: one commit shape per pattern (3 or 9 files of 200 KB, a manifest temporary, a rename), 30 interleaved rounds, median, macOS x86_64 APFS, `quiet exclusive` (`docs/PLATFORM_FINDINGS.md`, "Fewer flushes per commit").
+Probe `commit_probe.cc` (not kept in the repository): one commit shape per pattern (3 or 9 files of 200 KB, a manifest temporary, a rename), 30 interleaved rounds, median, macOS x86_64 APFS, on an otherwise idle machine (`docs/PLATFORM_FINDINGS.md`, "Fewer flushes per commit"). `test/sync_calls_test.cc` asserts the call sequences the library issues.
 
 | Pattern | Device flushes | 3 files | 9 files |
 |---|---|---:|---:|

@@ -3,7 +3,7 @@
 Branch `cl-2-owner-lock` of Kronuz/completion: code at `91d62cb`, docs and ledger through
 `616a8c1` (equal to `origin/cl-2-owner-lock`), based on `main` `7734544`. Catalog: cpp-libraries
 branch `cl-2-owner-lock` at `5d41c2d`, whose parent is on `main`. Reviewed 2026-10-20 in a
-detached worktree, `~/code/Kronuz/completion-wt/review-cl2`.
+detached checkout.
 
 Specs: the consolidation audit (`cpp-libraries/docs/reviews/consolidation-2026-10-19.md`: CL-2,
 C1 to C4, Responses), Detent's `docs/CONSOLIDATION_RESPONSE.md` ("CL-2: one ownership protocol"
@@ -41,7 +41,8 @@ default)") therefore can't be reached through the most natural spelling. The fal
 one mode that does not exclude a directory-only owner. The branch documents the trap
 (`io.h:170`, `README.md:83`) instead of closing it.
 
-Probe `.scratch/probes/braced_init_probe.cc`, run against the branch headers:
+Probe `braced_init_probe.cc` (not kept; CTest `completion_owner_braced_refused` now holds the
+fix), run against the branch headers:
 
 ```
 IO&.acquire_owner({})                -> bool(false)
@@ -111,14 +112,14 @@ releases the directory lock the winner believes it holds. The winner still holds
 `owner.lock`, so file and `both` competitors stay excluded, but a directory-only owner (strata's
 protocol) gets in.
 
-Probe `.scratch/probes/shared_io_race.cc`, 2000 iterations each:
+Probe `shared_io_race.cc` (not kept; `concurrent()` in `owner_lock_test` now holds the fix),
+2000 iterations each:
 
 - `both`: in 1993 iterations a winner held the lock while a third `PosixIO` took the directory
   lock.
 - `directory`: in 1990 iterations both threads held independently releasable handles.
 
-TSan reports 5 races, in `lock_owner` and in `~Owner` called from `lock_owner`'s unwind
-(`.scratch/probes/shared_io_race_tsan.log`).
+TSan reports 5 races, in `lock_owner` and in `~Owner` called from `lock_owner`'s unwind.
 
 Attribution: the `directory` alias is pre-existing. `shared_io_race_legacy.cc` with
 `acquire_directory_owner()` gives 1994/2000 on main headers and 1997/2000 on the branch. The
@@ -143,7 +144,7 @@ The ledger (`docs/status/cl-2.md:35-37`) says `test_local_paged_snapshot_plan` "
 5 s for heap reclamation and calls no owner-lock code" and calls the failure unattributed
 timing. Both statements are wrong:
 
-1. The first run aborted at 1.20 s (`~/.scratch/cl-2/detent-ctest.log:330`), too soon for the
+1. The first run aborted at 1.20 s (line 330 of its CTest log), too soon for the
    5-second deadline at `test_paged_snapshot_plan.cc:159-163`.
 2. That check throws `runtime_error`, not the exception that actually fires.
 3. The test does take the owner lock: `make_disk_store` reaches `make_owned_storage_session`,
@@ -151,7 +152,7 @@ timing. Both statements are wrong:
    path.
 
 So 20/20 isolated plus one full rerun was not enough evidence, and the stated cause did not
-fit it. I measured it instead (`.scratch/detent-flake/`). Both sides use the same Detent
+fit it. I measured it instead. Both sides use the same Detent
 source (`3d05a4f`), Release, and the developer's AppleClang, with only the completion
 override differing (`7a18c07` = main's headers, `5bd697f` = the branch's headers, each
 verified by `diff -r`). Runs are 150 per block at 4 in parallel, blocks interleaved:
@@ -174,10 +175,9 @@ The flake itself is Detent's: a `StoragePressure` escapes somewhere other than t
 
 ### CL2-5. The six mutation probes the ledger cites weren't kept (low, process)
 
-`docs/status/cl-2.md:20` names six mutants that fail the suite, but none exists in the
-developer's worktree or `.scratch`. I rebuilt them, plus eight more, in
-`.scratch/mutants/mutate.py` (exact-anchor replacements) and `run.sh`, Homebrew clang 23,
-`-O1`:
+`docs/status/cl-2.md:20` names six mutants that fail the suite, but none was kept. I rebuilt
+them, plus eight more, as exact-anchor replacements (`mutate.py` and `run.sh`, not kept in the
+repository), Homebrew clang 23, `-O1`:
 
 | Mutant | Result |
 |---|---|
@@ -201,7 +201,7 @@ the same results.
 
 ### CL2-6. C1 compatibility: same bytes and refusals, one message text changed (info)
 
-`.scratch/probes/legacy_transcript.cc`, built against main's and the branch's headers by
+`legacy_transcript.cc` (not kept), built against main's and the branch's headers by
 `legacy_diff.sh`, records outcome, error category and value, `what()`, the directory listing
 (mode, size, link count) and descriptor leaks for 21 legacy steps under umask 0. The only
 differences are:
@@ -227,7 +227,7 @@ branch, headers identical to `616a8c1`) passes 8/8 on my rerun.
 The base `lock_owner` throws `not_supported` without recursing (`io.h:226`, test `base()`,
 `legacy.calls == 0`). Existing test IOs still compile: strata's `faultfs_test`,
 `directory_test`, `index_test` and `background_merge_test` pass a syntax-only compile with
-`-Wall -Woverloaded-virtual -Werror` against the branch (`.scratch/probes/consumer_syntax.sh`).
+`-Wall -Woverloaded-virtual -Werror` against the branch (`consumer_syntax.sh`, not kept).
 Hiding the new non-virtual overload raises no `-Woverloaded-virtual` warning.
 
 ### CL2-7. Ordering, errno mapping and the matrix: verified (no finding)
@@ -281,7 +281,12 @@ in the same series (C4).
    Detent.
 4. CL2-7: add ENOLCK's handling to PLATFORM_FINDINGS §9.
 
-## Probes (kept in `.scratch/`, not to be deleted)
+## Probes (not kept in the repository)
+
+The probes and logs below were local to the review and are gone. Two findings are held in the
+repository by tests: CL2-1 by `completion_owner_braced_refused`, CL2-3 by `owner_lock_test`'s
+`concurrent()`. The mutants (CL2-5), the legacy transcript (CL2-6) and the Detent A/B (CL2-4)
+have no harness here.
 
 - `build.sh debug|asan|tsan`: the suite under Homebrew clang 23, with Debug, ASan+UBSan and TSan
   each 15/15. Logs are `build-*.ctest.log`, with 0 sanitizer reports. The binaries were checked
@@ -308,15 +313,13 @@ in the same series (C4).
 - Network, FUSE and SMB filesystems.
 - A thread-safety contract for `IO` beyond the probe.
 - A test that drops the image-job facade while its original is outstanding.
-- The journal suite rebuilt from source. I reran the developer's journal build (it wrote
-  `Testing/` in `~/.scratch/cl-2/journal-build`).
+- The journal suite rebuilt from source. I reran the developer's journal build.
 
 ## Re-check
 
 Scope: CL2-1, CL2-2, CL2-3, CL2-4, CL2-6 and CL2-7, `git log 616a8c1..54b60db` (code at `9ed8efa`,
-the tip `54b60db` is docs only). Re-checked 2026-10-20 in this worktree at `54b60db`, Homebrew
-clang 23, `quiet check` exit 0 before every compile. Probe copies and logs are in
-`~/.scratch/cl2-recheck/` (`braced_real.cc`, `race.sh`).
+the tip `54b60db` is docs only). Re-checked 2026-10-20 at `54b60db`, Homebrew
+clang 23. The re-check's probes (`braced_real.cc`, `race.sh`) were not kept.
 
 | Finding | Verdict | Evidence |
 |---|---|---|

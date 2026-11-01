@@ -3,12 +3,16 @@
 Measurements and mechanisms that strata found while tuning its index on top of this
 library, recorded here for every consumer (Detent's journal and authority, strata,
 Xapiand). Each entry names the platforms measured, the numbers, what this library now
-does about it, and what a consumer should do. Raw probes live in the strata checkout
-under `.scratch/`; summaries of record are in strata's `docs/perf/`.
+does about it, and what a consumer should do. Summaries of record are in strata's
+`docs/perf/`. The timing probes are kept in neither repository: each entry states its
+probe's method (what it writes, how many rounds, which statistic) so it can be rebuilt,
+and what this library does about each finding is asserted by its own tests
+(`test/sync_calls_test.cc`, `test/sync_files_test.cc`, `test/dir_lock_test.cc`,
+`test/owner_lock_test.cc`).
 
 Platforms: macOS 15.8 x86_64 APFS (i9-9980HK, internal SSD), Linux 6.8 x86_64 ext4
-(QEMU/HVF gate VM, virtio, `cache=none`), FreeBSD 14.4 x86_64 UFS with soft updates
-(VM, virtio), and macOS 27 arm64 APFS (M1 Pro) where noted.
+(QEMU VM under the macOS Hypervisor framework, virtio, `cache=none`), FreeBSD 14.4 x86_64
+UFS with soft updates (VM, virtio), and macOS 27 arm64 APFS (M1 Pro) where noted.
 
 ## 1. Make many files durable with one flush per device: `IO::sync_files`
 
@@ -16,8 +20,8 @@ A durable commit that syncs each new file separately pays one device flush per f
 On macOS `File::sync` is `F_FULLFSYNC`, which flushes the drive's whole cache, so the
 cost is the flush count, not the bytes.
 
-`sync_probe.cc` (strata `.scratch/commitcost/`): N new files of 200 KB written, made
-durable, then a directory barrier; median of 15 rounds.
+The probe (`sync_probe.cc`, not kept): N new files of 200 KB written, made durable, then a
+directory barrier; median of 15 rounds.
 
 | 9 files | One full sync each | Batched | Batched form |
 |---|---:|---:|---|
@@ -67,8 +71,8 @@ The ordering argument is per barrier:
    The directory flush after the rename (`fsync` plus `F_FULLFSYNC`) is unchanged: it is the acknowledgement point
    and flushes everything. A file on a device other than the directory's is flushed in full inside the call.
 
-Probe (`commit_probe.cc`, one commit shape per pattern: 3 or 9 files of 200 KB, a manifest temporary, a rename;
-30 interleaved rounds, median, macOS x86_64 APFS, `quiet exclusive`):
+Probe (`commit_probe.cc`, not kept; one commit shape per pattern: 3 or 9 files of 200 KB, a manifest temporary, a
+rename; 30 interleaved rounds, median, macOS x86_64 APFS, on an otherwise idle machine):
 
 | Pattern | Device flushes | 3 files | 9 files |
 |---|---|---:|---:|
