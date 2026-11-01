@@ -4,11 +4,13 @@ Measurements and mechanisms that strata found while tuning its index on top of t
 library, recorded here for every consumer (Detent's journal and authority, strata,
 Xapiand). Each entry names the platforms measured, the numbers, what this library now
 does about it, and what a consumer should do. Summaries of record are in strata's
-`docs/perf/`. The timing probes are kept in neither repository: each entry states its
-probe's method (what it writes, how many rounds, which statistic) so it can be rebuilt,
-and what this library does about each finding is asserted by its own tests
-(`test/sync_calls_test.cc`, `test/sync_files_test.cc`, `test/dir_lock_test.cc`,
-`test/owner_lock_test.cc`).
+`docs/perf/`. The timing probes are in `bench/` (`sync_probe.cc`, `commit_probe.cc`,
+`unlink_probe.cc`, `dirflush_probe.cc`; build with `-DCOMPLETION_BUILD_BENCH=ON`, commands in
+`AGENTS.md`): each entry names its probe and states its method (what it writes, how many
+rounds, which statistic). The numbers below are the original runs on the platforms listed;
+a probe prints the same shape on any host. What this library does about each finding is
+asserted by its own tests (`test/sync_calls_test.cc`, `test/sync_files_test.cc`,
+`test/dir_lock_test.cc`, `test/owner_lock_test.cc`).
 
 Platforms: macOS 15.8 x86_64 APFS (i9-9980HK, internal SSD), Linux 6.8 x86_64 ext4
 (QEMU VM under the macOS Hypervisor framework, virtio, `cache=none`), FreeBSD 14.4 x86_64
@@ -20,8 +22,9 @@ A durable commit that syncs each new file separately pays one device flush per f
 On macOS `File::sync` is `F_FULLFSYNC`, which flushes the drive's whole cache, so the
 cost is the flush count, not the bytes.
 
-The probe (`sync_probe.cc`, not kept): N new files of 200 KB written, made durable, then a
-directory barrier; median of 15 rounds.
+The probe (`bench/sync_probe.cc`, `completion_sync_probe DIRECTORY 9 15`): N new files of 200 KB written, made durable, then a
+directory barrier; median of 15 rounds. It times one full sync each, `IO::sync_files`, concurrent `fsync` threads,
+`fdatasync` each, and where they exist `syncfs` (Linux) and `aio_fsync` (FreeBSD).
 
 | 9 files | One full sync each | Batched | Batched form |
 |---|---:|---:|---|
@@ -71,7 +74,7 @@ The ordering argument is per barrier:
    The directory flush after the rename (`fsync` plus `F_FULLFSYNC`) is unchanged: it is the acknowledgement point
    and flushes everything. A file on a device other than the directory's is flushed in full inside the call.
 
-Probe (`commit_probe.cc`, not kept; one commit shape per pattern: 3 or 9 files of 200 KB, a manifest temporary, a
+Probe (`bench/commit_probe.cc`, `completion_commit_probe DIRECTORY 30 3 9`; one commit shape per pattern: 3 or 9 files of 200 KB, a manifest temporary, a
 rename; 30 interleaved rounds, median, macOS x86_64 APFS, on an otherwise idle machine):
 
 | Pattern | Device flushes | 3 files | 9 files |
@@ -118,6 +121,13 @@ random 4 KiB read p99 from 0.26 ms to 10–28 ms; truncating from the end in 16 
 first cuts that to 4–5 ms (p99.9 still 12–31 ms). Truncation in steps costs up to 1.9×
 one unlink's total time but bounds each pause. Truncating a mapped file raises SIGBUS on
 a read past the new end, so truncate only after the last mapping is released.
+
+The probe (`bench/unlink_probe.cc`, `completion_unlink_probe DIRECTORY 2048 16`) writes a file of the given
+size, settles it with `sync(2)` (on ext4 a file removed right after its `fsync` frees in microseconds; the cost
+appears once the blocks are committed), and times `IO::remove` three times. Then a thread reads random 4 KiB
+blocks of other files, uncached (`O_DIRECT` on Linux, `F_NOCACHE` on macOS; FreeBSD reads through the page
+cache), while the main thread waits, removes a file at once, and truncates one from the end in steps before
+removing it; it prints each phase's read latency quantiles.
 
 **For a consumer:** reclaim obsolete journal segments, snapshots, and images from a
 queue, in bounded steps, off the latency-critical path; never unlink a large file inline
@@ -189,7 +199,8 @@ probed a directory `flock` and a directory-descriptor `F_FULLFSYNC` on macOS 15 
   tmpfs, FreeBSD, macOS APFS).
 - `F_FULLFSYNC` on a directory descriptor is a device flush: 20.5 ms p50 after a staged
   write, against 20.4 ms on a regular file and 2 µs for `fsync(dir)`. No power cut has
-  tested it.
+  tested it. The probe is `bench/dirflush_probe.cc` (`completion_dirflush_probe DIRECTORY 50`): it
+  stages a 200 KB write and times one flush per call, rotating the calls, and prints the median and p90.
 - Over NFS, Linux emulates `flock` as a whole-file lock that needs the file open for
   writing, or keeps it local under `local_lock`; over SMB it is a mandatory byte-range
   lock (`flock(2)`). A directory cannot be opened for writing, so a directory lock there

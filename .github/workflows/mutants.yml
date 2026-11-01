@@ -1,0 +1,18 @@
+name: mutants
+# The 14 owner-lock mutants against the suite (tools/mutants.py): one build and one ctest run
+# each, so it runs by hand rather than on every push.
+on:
+  workflow_dispatch:
+jobs:
+  mutants:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15, macos-15-intel]
+    steps:
+      - uses: actions/checkout@v5
+      - name: Mutants
+        run: python3 tools/mutants.py --jobs 4

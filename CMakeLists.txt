@@ -30,6 +30,24 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
   add_executable(completion_demo examples/demo.cc)
   target_link_libraries(completion_demo PRIVATE completion::completion)
   include(CTest)
+  # The platform probes behind docs/PLATFORM_FINDINGS.md: timing programs, not tests. The smoke
+  # tests below run each once on a small input to show it builds and runs; they time nothing.
+  option(COMPLETION_BUILD_BENCH "Build the platform probes in bench/" OFF)
+  if(COMPLETION_BUILD_BENCH)
+    foreach(p sync commit unlink dirflush)
+      add_executable(completion_${p}_probe bench/${p}_probe.cc)
+      target_link_libraries(completion_${p}_probe PRIVATE completion::completion)
+    endforeach()
+    if(BUILD_TESTING)
+      set(probe_dir "${CMAKE_CURRENT_BINARY_DIR}/probe-state")
+      add_test(NAME completion_probe_sync COMMAND completion_sync_probe "${probe_dir}" 3 2)
+      add_test(NAME completion_probe_commit COMMAND completion_commit_probe "${probe_dir}" 2 2)
+      add_test(NAME completion_probe_unlink COMMAND completion_unlink_probe "${probe_dir}" 48 16)
+      add_test(NAME completion_probe_dirflush COMMAND completion_dirflush_probe "${probe_dir}" 3)
+      set_tests_properties(completion_probe_sync completion_probe_commit completion_probe_unlink completion_probe_dirflush
+        PROPERTIES RUN_SERIAL TRUE TIMEOUT 300)
+    endif()
+  endif()
   if(BUILD_TESTING)
     foreach(t core allocation resource posix_resource scan inspection cursor_close reuse image_close create_into sync_files sync_calls map dir_lock dir_trust owner_lock)
       add_executable(completion_${t}_test test/${t}_test.cc)
@@ -47,6 +65,12 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
       -DSOURCE=${CMAKE_CURRENT_SOURCE_DIR}/test/owner_braced_refused.cc
       "-DINCLUDES=$<JOIN:$<TARGET_PROPERTY:completion,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:metrics::metrics,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:allocators::resources,INTERFACE_INCLUDE_DIRECTORIES>,|>"
       -P ${CMAKE_CURRENT_SOURCE_DIR}/test/owner_braced_check.cmake)
+    # tools/mutants.py: every owner-lock mutant's anchor still occurs exactly once. Running the mutants
+    # (`python3 tools/mutants.py`) rebuilds the suite 14 times and is not a test.
+    find_package(Python3 COMPONENTS Interpreter QUIET)
+    if(Python3_Interpreter_FOUND)
+      add_test(NAME completion_mutants_anchors COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/mutants.py --check)
+    endif()
     # The directory lock again on tmpfs, where Linux has one (/dev/shm); the test checks it is.
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IS_DIRECTORY /dev/shm)
       string(MD5 dir_lock_id "${CMAKE_CURRENT_BINARY_DIR}")

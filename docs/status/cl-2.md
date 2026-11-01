@@ -21,8 +21,8 @@ queued when this was written; the lead watches it. Earlier green run 39380284199
   recover, aliases, lifetime through an image job, refusals). Six mutation probes (order,
   EINTR, file-only fallback, held checks, unwind, EOPNOTSUPP mapping) each fail it; the
   reviewer rebuilt them and eight more (12 of 14 killed, the 2 survivors unobservable by
-  design; the mutants are listed in `docs/reviews/cl-2-code.md`, CL2-5, and their script was
-  not kept).
+  design; the mutants are listed in `docs/reviews/cl-2-code.md`, CL2-5, and `tools/mutants.py`
+  applies them to the current code).
 - Docs: README (three modes, quick start on `both`, compiled), ARCHITECTURE, AGENTS
   (traps), PLATFORM_FINDINGS section 9.
 - 91d62cb the API and `completion_owner_lock`; CI run 39380284199 passed it on

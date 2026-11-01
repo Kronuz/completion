@@ -21,6 +21,8 @@ include/completion/
   allocation.h          AllocationContext and OwnedAllocator.
   api.h                 The kronuz::io::completion entry point.
 test/                   One suite per feature (core, allocation, scan, inspection, reuse, map, owner_lock, ...).
+bench/                  The platform probes behind PLATFORM_FINDINGS.md (sync, commit, unlink, directory flush); COMPLETION_BUILD_BENCH.
+tools/mutants.py        The 14 owner-lock mutants of the CL-2 review, applied to a scratch copy and run against the suite.
 examples/demo.cc        Batched durability across two directories.
 docs/                   PLATFORM_FINDINGS.md, MEASUREMENTS.md, mechanisms/, completion.d2 (the README diagram's source).
 ```
@@ -61,11 +63,32 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2 && cte
 
 - **Compatibility gate.** journal's suites against this checkout, before landing:
   `git clone https://github.com/Kronuz/journal ../journal && cmake -S ../journal -B build-journal -DFETCHCONTENT_SOURCE_DIR_COMPLETION=$PWD && cmake --build build-journal && ctest --test-dir build-journal`.
-- **Not here.** No mutation script: `docs/reviews/cl-2-code.md` (CL2-5) lists 14 owner-lock
-  mutants and the 12 the suite kills, and their script was not kept. No benchmark target:
-  `docs/MEASUREMENTS.md` has each feature's qualification runs and object sizes, and
-  `docs/PLATFORM_FINDINGS.md` and `docs/mechanisms/commit-barriers.md` the platform timings
-  (batched syncs, barriers, unlink cost) with each probe's method; the probes were not kept.
+- **Mutants.** `python3 tools/mutants.py` copies the repository to a scratch directory, applies
+  each of the 14 owner-lock mutants of `docs/reviews/cl-2-code.md` (CL2-5), rebuilds, runs the
+  suite, and requires the expected outcome: 12 killed, `m8` (release order) and `m9` (no sync
+  after create) surviving because nothing observes them. `m6` (`EOPNOTSUPP` unmapped) and
+  `m14` (`owner_fd_` unrecorded) are killed on macOS only: Linux and FreeBSD define
+  `EOPNOTSUPP` equal to `ENOTSUP`, and only the macOS directory sync reads `owner_fd_`. It
+  takes one build and one ctest run per mutant (`--list`, `--only m1,m6`, `--jobs N`,
+  `--cmake-arg=-DCMAKE_CXX_COMPILER=clang++`). The CTest test `completion_mutants_anchors`
+  checks that each anchor still matches exactly once; the `mutants` workflow
+  (`workflow_dispatch`) runs the script on Linux and macOS.
+- **Platform probes.** `docs/PLATFORM_FINDINGS.md` and `docs/mechanisms/commit-barriers.md` cite
+  four timing programs, built with `-DCOMPLETION_BUILD_BENCH=ON` (CI builds them and runs each
+  once on a small input, as the CTest tests `completion_probe_*`, which time nothing):
+
+  ```sh
+  cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCOMPLETION_BUILD_BENCH=ON && cmake --build build -j2
+  D=/path/on/the/device/under/test        # the directory decides which device is measured
+  build/completion_sync_probe     $D 9 15       # section 1: files, rounds
+  build/completion_commit_probe   $D 30 3 9     # "Fewer flushes per commit": rounds, file counts
+  build/completion_unlink_probe   $D 2048 16    # section 2: MiB, truncation step in MiB
+  build/completion_dirflush_probe $D 50         # section 7: rounds
+  ```
+
+  Time only on an otherwise idle machine; each prints medians (or quantiles) per variant. No
+  other benchmark target: `docs/MEASUREMENTS.md` has each feature's qualification runs and
+  object sizes.
 
 ## Rules for I/O code
 

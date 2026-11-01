@@ -41,7 +41,7 @@ default)") therefore can't be reached through the most natural spelling. The fal
 one mode that does not exclude a directory-only owner. The branch documents the trap
 (`io.h:170`, `README.md:83`) instead of closing it.
 
-Probe `braced_init_probe.cc` (not kept; CTest `completion_owner_braced_refused` now holds the
+Probe `braced_init_probe.cc` (a one-off; CTest `completion_owner_braced_refused` now holds the
 fix), run against the branch headers:
 
 ```
@@ -112,7 +112,7 @@ releases the directory lock the winner believes it holds. The winner still holds
 `owner.lock`, so file and `both` competitors stay excluded, but a directory-only owner (strata's
 protocol) gets in.
 
-Probe `shared_io_race.cc` (not kept; `concurrent()` in `owner_lock_test` now holds the fix),
+Probe `shared_io_race.cc` (a one-off; `concurrent()` in `owner_lock_test` now holds the fix),
 2000 iterations each:
 
 - `both`: in 1993 iterations a winner held the lock while a third `PosixIO` took the directory
@@ -176,8 +176,10 @@ The flake itself is Detent's: a `StoragePressure` escapes somewhere other than t
 ### CL2-5. The six mutation probes the ledger cites weren't kept (low, process)
 
 `docs/status/cl-2.md:20` names six mutants that fail the suite, but none was kept. I rebuilt
-them, plus eight more, as exact-anchor replacements (`mutate.py` and `run.sh`, not kept in the
-repository), Homebrew clang 23, `-O1`:
+them, plus eight more, as exact-anchor replacements, Homebrew clang 23, `-O1`. The repository
+now holds them as `tools/mutants.py` (`python3 tools/mutants.py`; `--list` names each, and
+the CTest test `completion_mutants_anchors` keeps every anchor matching exactly once). The
+table is that review's run; the script reproduces each result:
 
 | Mutant | Result |
 |---|---|
@@ -201,8 +203,8 @@ the same results.
 
 ### CL2-6. C1 compatibility: same bytes and refusals, one message text changed (info)
 
-`legacy_transcript.cc` (not kept), built against main's and the branch's headers by
-`legacy_diff.sh`, records outcome, error category and value, `what()`, the directory listing
+`legacy_transcript.cc` (a one-off comparison of main's and the branch's headers, `616a8c1` and the
+branch tip) records outcome, error category and value, `what()`, the directory listing
 (mode, size, link count) and descriptor leaks for 21 legacy steps under umask 0. The only
 differences are:
 
@@ -227,7 +229,7 @@ branch, headers identical to `616a8c1`) passes 8/8 on my rerun.
 The base `lock_owner` throws `not_supported` without recursing (`io.h:226`, test `base()`,
 `legacy.calls == 0`). Existing test IOs still compile: strata's `faultfs_test`,
 `directory_test`, `index_test` and `background_merge_test` pass a syntax-only compile with
-`-Wall -Woverloaded-virtual -Werror` against the branch (`consumer_syntax.sh`, not kept).
+`-Wall -Woverloaded-virtual -Werror` against the branch (a one-off syntax-only compile of those tests).
 Hiding the new non-virtual overload raises no `-Woverloaded-virtual` warning.
 
 ### CL2-7. Ordering, errno mapping and the matrix: verified (no finding)
@@ -281,12 +283,13 @@ in the same series (C4).
    Detent.
 4. CL2-7: add ENOLCK's handling to PLATFORM_FINDINGS §9.
 
-## Probes (not kept in the repository)
+## Probes
 
-The probes and logs below were local to the review and are gone. Two findings are held in the
-repository by tests: CL2-1 by `completion_owner_braced_refused`, CL2-3 by `owner_lock_test`'s
-`concurrent()`. The mutants (CL2-5), the legacy transcript (CL2-6) and the Detent A/B (CL2-4)
-have no harness here.
+The probes and logs below were one-off programs of the review. The repository holds three of
+its findings as running checks: CL2-1 by `completion_owner_braced_refused`, CL2-3 by
+`owner_lock_test`'s `concurrent()`, and CL2-5 by `tools/mutants.py`. The legacy transcript
+(CL2-6) compared two commits' headers, and the Detent A/B (CL2-4) ran Detent's suite against
+two completion checkouts; the findings above record their results.
 
 - `build.sh debug|asan|tsan`: the suite under Homebrew clang 23, with Debug, ASan+UBSan and TSan
   each 15/15. Logs are `build-*.ctest.log`, with 0 sanitizer reports. The binaries were checked
@@ -297,7 +300,7 @@ have no harness here.
   (CL2-6).
 - `probes/consumer_syntax.sh`, with `syntax-*.log` (CL2-6).
 - `probes/readme_quickstart.cc`: the README quick start passes a syntax-only compile.
-- `mutants/mutate.py`, `mutants/run.sh`, and the `m*.run.log` and `m*.build.log` files (CL2-5).
+- `mutants/mutate.py`, `mutants/run.sh` and the `m*` logs (CL2-5), now `tools/mutants.py`.
 - `detent-flake/build_ab.sh` and `repeat.sh`, with `runs-{build-base,build-cl2,detent-build}/`
   (CL2-4).
 
@@ -319,7 +322,7 @@ have no harness here.
 
 Scope: CL2-1, CL2-2, CL2-3, CL2-4, CL2-6 and CL2-7, `git log 616a8c1..54b60db` (code at `9ed8efa`,
 the tip `54b60db` is docs only). Re-checked 2026-10-20 at `54b60db`, Homebrew
-clang 23. The re-check's probes (`braced_real.cc`, `race.sh`) were not kept.
+clang 23. The re-check's probes (`braced_real.cc`, `race.sh`) are held by `completion_owner_braced_refused` and `concurrent()`.
 
 | Finding | Verdict | Evidence |
 |---|---|---|
