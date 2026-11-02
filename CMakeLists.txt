@@ -6,7 +6,7 @@ project(completion LANGUAGES CXX)
 include(FetchContent)
 FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG d7d4c4dc603adc61106f1b11845fdf9a78b2b557)
 # Shared owning PMR allocation contexts, without global allocation overrides.
-FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG c558fa76521857d8547ca9267bce8ed8aac70835)
+FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG 6eb7fb2e00fbc2bad24dc82c387fedac3edbb0f4)
 FetchContent_MakeAvailable(metrics allocators)
 
 find_package(Threads REQUIRED)
