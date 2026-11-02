@@ -4,9 +4,9 @@ project(completion LANGUAGES CXX)
 # Completion-based file I/O: native backends (io_uring on Linux, kqueue on BSD and macOS,
 # a thread pool elsewhere), image publication, and directory scans. Header-only.
 include(FetchContent)
-FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG d7d4c4dc603adc61106f1b11845fdf9a78b2b557)
+FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG db490b484f48e8cd8593802c6acf8db18392d3d1)
 # Shared owning PMR allocation contexts, without global allocation overrides.
-FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG 6eb7fb2e00fbc2bad24dc82c387fedac3edbb0f4)
+FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG 07de45d180f23e2552b9504a6b4d506651594d1e)
 FetchContent_MakeAvailable(metrics allocators)
 
 find_package(Threads REQUIRED)

@@ -6,6 +6,13 @@ entries are dated.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#completion) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-02
+
+### Changed
+
+- Pins metrics at `db490b4` and allocators at `07de45d`, their heads; both moves past `d7d4c4d`
+  and `6eb7fb2` are docs only.
+
 ## 2026-11-01
 
 ### Added
