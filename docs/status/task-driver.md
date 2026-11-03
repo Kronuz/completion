@@ -27,8 +27,9 @@ journal:836c98b (CI 41574972922 green on all eight jobs) and consensus:c7bf941.
 - `test/asio_extension_test.cc`: ported; new sections `homes` (two schedulers on two threads: a
   run awaited through the owner returns the awaiter to its own scheduler and thread; another
   scheduler is refused), `yield` (work posted at step 3 runs at step 15, via a queue that never
-  reports "not yet"), `cancel` (a token requested 20 ms into a 100 ms held drive: the drive
-  completes all 21 steps and the caller's token-bound await sees the request). A second argument
+  reports "not yet"), `cancel` (a smoke test only: a token requested 20 ms into a 100 ms held drive cannot reach
+  `drive()`, which takes no token, so the drive's uncancellability is structural and the section
+  proves only that the drive completes all 21 steps; code review CR1). A second argument
   runs one section (`core`, `homes`, `yield`, `cancel`).
 - Proof, macOS arm64 (AppleClang 17): full suite 19 of 19 in ASan+UBSan (Debug) and in TSan
   (RelWithDebInfo), separate builds; the same on Linux in CI.

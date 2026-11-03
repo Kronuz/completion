@@ -315,8 +315,8 @@ void yields_to_owner(const std::shared_ptr<c::PosixIO> &backend) {
 	check(ran && seen == 15 && state->completed == 21);
 }
 
-// A token requested while the drive waits on the queue does not end it: the original completes
-// every step and leaves nothing in flight. The caller's own token-bound await sees the request.
+// Smoke test: run() takes no cancel token, so a request made while the drive waits cannot reach
+// it (structural, not proven here). The original completes every step and leaves nothing in flight.
 task::task<void> uncancelled_drive(std::shared_ptr<j::AsioCompletionDriver<HeldQueue>> driver,
 								   std::shared_ptr<Operation> operation, std::shared_ptr<State> state,
 								   std::shared_ptr<HeldQueue> queue, task::cancel_source &source,

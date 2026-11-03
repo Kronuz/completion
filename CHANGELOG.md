@@ -17,7 +17,7 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
   awaitable had to run on the owner executor; any other gets `std::logic_error`, thrown when it
   awaits. Spawn the call with `task::spawn(task::scheduler_ref::of(scheduler), ...)` where
   `asio::co_spawn(executor, ...)` was. Behavior, statistics and cancellation semantics are
-  unchanged: the drive ignores a cancel request and completes its original, and the 16-step yield
+  unchanged: `run()` takes no cancel token, so nothing cancels a drive and it completes its original, and the 16-step yield
   and the 1 ms poll fallback stay.
 - `completion::asio` links `task::asio` and builds when `COMPLETION_ASIO` is on (the default for a
   top-level build; a dependent sets it before `FetchContent_MakeAvailable`). It fetches
