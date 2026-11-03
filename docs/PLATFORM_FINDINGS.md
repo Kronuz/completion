@@ -60,6 +60,8 @@ way to know which files are durable, so the next attempt must write them again.
 
 ### Fewer flushes per commit: `sync_files_and_directory` and `order_files_and_directory`
 
+The asynchronous driver runs both as one primitive each (`SyncFiles`, `OrderFiles`); `docs/mechanisms/sync-files.md` has each platform's call sequence, what reaches stable storage, and what an error leaves undone.
+
 A commit that publishes a manifest by rename paid about four device flushes on macOS: the data batch, the
 directory, the manifest temporary, and the directory after the rename. Two additive calls remove up to three.
 The ordering argument is per barrier:
