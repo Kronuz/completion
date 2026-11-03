@@ -68,8 +68,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2 && cte
   after create) surviving because nothing observes them. `m6` (`EOPNOTSUPP` unmapped) and
   `m14` (`owner_fd_` unrecorded) are killed on macOS only: Linux and FreeBSD define
   `EOPNOTSUPP` equal to `ENOTSUP`, and only the macOS directory sync reads `owner_fd_`. It
-  takes one build and one ctest run per mutant (`--list`, `--only m1,m6`, `--jobs N`,
-  `--cmake-arg=-DCMAKE_CXX_COMPILER=clang++`). The CTest test `completion_mutants_anchors`
+  takes one build and one ctest run per mutant. Six more, `s1` to `s6`, break the sync primitives (device flush, ordering barrier, directory sync, a file's fsync, which call a primitive makes): `s4` survives off macOS (the two sequences are equal there), `s6` survives on macOS (its code is not compiled there), the rest are killed everywhere. Options: `--list`, `--only m1,m6`, `--jobs N`,
+  `--cmake-arg=-DCMAKE_CXX_COMPILER=clang++`. The CTest test `completion_mutants_anchors`
   checks that each anchor still matches exactly once; the `mutants` workflow
   (`workflow_dispatch`) runs the script on Linux and macOS.
 - **Platform probes.** `docs/PLATFORM_FINDINGS.md` and `docs/mechanisms/commit-barriers.md` cite
