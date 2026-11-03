@@ -21,7 +21,7 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
   and the 1 ms poll fallback stay.
 - `completion::asio` links `task::asio` and builds when `COMPLETION_ASIO` is on (the default for a
   top-level build; a dependent sets it before `FetchContent_MakeAvailable`). It fetches
-  [task](https://github.com/Kronuz/task) at `d3d94f3`, which fetches Asio 1.36.0 unless
+  [task](https://github.com/Kronuz/task) at `6558c2e`, which fetches Asio 1.36.0 unless
   `ASIO_INCLUDE_DIR` names a checkout. The core `completion::completion` is unchanged and needs
   neither. `asio_completion.h` includes the Asio headers it uses, not `<asio.hpp>`.
 - The driver's test now runs in CI: it covers the scheduler a `run()` resumes on, the owner yield
