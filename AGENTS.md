@@ -16,7 +16,7 @@ include/completion/
   native_completion.h   Selects the platform queue.
   linux_completion.h    LinuxCompletionQueue: io_uring.
   bsd_completion.h      BsdCompletionQueue: POSIX AIO (FreeBSD kqueue, macOS polled).
-  asio_completion.h     The optional coroutine driver (completion::asio).
+  asio_completion.h     The optional task::task driver (completion::asio).
   image.h               ImagePreparation and ImagePublication jobs.
   allocation.h          AllocationContext and OwnedAllocator.
   api.h                 The kronuz::io::completion entry point.
@@ -42,9 +42,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2 && cte
   `PosixIO` issues on macOS and asserts the protocol; `sync_files_test` models separate device
   caches and injects failed calls; `owner_lock_test` runs all 25 holder pairings in three topologies
   (17 exclude, 8 are the unsafe legacy control); `completion_owner_braced_refused` fails if the
-  `= delete` overload leaves `io.h`. The Asio adapter's test needs standalone Asio, which nothing
-  fetches: `git clone --depth 1 https://github.com/chriskohlhoff/asio ../asio`, then configure
-  with `-DASIO_INCLUDE_DIR=$PWD/../asio/asio/include`.
+  `= delete` overload leaves `io.h`. The task driver's test (`COMPLETION_ASIO`, on for a top-level build) fetches
+  task, which fetches Asio; to reuse a checkout, pass `-DASIO_INCLUDE_DIR=$PWD/../asio/asio/include`.
 - **Sanitizers.** CI (`.github/workflows/ci.yml`, the catalog's shared
   [`cmake.yml`](https://github.com/Kronuz/cpp-libraries/blob/main/.github/workflows/cmake.yml))
   runs Linux x86_64 (GCC, Clang) and arm64 (GCC), macOS arm64 and x86_64, FreeBSD, and these two

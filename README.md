@@ -10,7 +10,7 @@ Part of [Kronuz C++ Libraries](https://github.com/Kronuz/cpp-libraries), a colle
 Owned file I/O for C++20: io_uring and POSIX AIO drivers that keep every in-flight buffer alive
 until the kernel is done. An operation owns its buffers, names and file leases and issues one
 primitive at a time to whichever driver the host runs: synchronous, io_uring on Linux, POSIX
-AIO on FreeBSD and macOS, or Asio coroutines. A hardened directory backend and explicit file
+AIO on FreeBSD and macOS, or `task::task` coroutines on Asio. A hardened directory backend and explicit file
 and directory barriers make writes durable. It is the storage layer under
 [journal](https://github.com/Kronuz/journal) and [strata](https://github.com/Kronuz/strata).
 
@@ -71,7 +71,7 @@ int main() {
 
 Requires a C++20 compiler and CMake 3.16 or newer; it fetches
 [metrics](https://github.com/Kronuz/metrics) and [allocators](https://github.com/Kronuz/allocators)
-at pinned commits. The Asio adapter needs standalone Asio from the host. CI builds it on Linux
+at pinned commits. The `completion::asio` driver also fetches [task](https://github.com/Kronuz/task) (and, through it, standalone Asio unless `-DASIO_INCLUDE_DIR` names a checkout) when `COMPLETION_ASIO` is on, which it is by default only for a top-level build. CI builds it on Linux
 (x86_64, arm64), macOS (arm64, x86_64), and FreeBSD, plus ASan, UBSan, and TSan builds.
 
 ```cmake
@@ -81,11 +81,12 @@ FetchContent_Declare(completion
   GIT_TAG        5ef01ad2d5acadcfb919da82e4fafb3283b4b448)  # main tracks the tip
 FetchContent_MakeAvailable(completion)
 
-target_link_libraries(my_app PRIVATE completion::completion)   # or completion::asio
+target_link_libraries(my_app PRIVATE completion::completion)   # or completion::asio (set(COMPLETION_ASIO ON) first)
 ```
 
-Then `#include "completion/api.h"` and use `kronuz::io::completion`; the Asio adapter is
-`completion/asio_completion.h`.
+Then `#include "completion/api.h"` and use `kronuz::io::completion`; the task driver is
+`completion/asio_completion.h`: `AsioCompletionDriver<Queue>(task::asio_scheduler&, queue)` and
+`task::task<void> run(operation)`.
 
 ## 🎯 When to use it
 
@@ -124,7 +125,7 @@ cmake --build build -j2
 ctest --test-dir build --output-on-failure
 ```
 
-Add `-DASIO_INCLUDE_DIR=/path/to/asio/include` to also build the coroutine adapter's test.
+The task driver's test builds with it (`-DCOMPLETION_ASIO=OFF` skips it); add `-DASIO_INCLUDE_DIR=/path/to/asio/include` to reuse an Asio checkout instead of fetching one.
 
 ## 🤝 Contributing
 

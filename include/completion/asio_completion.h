@@ -24,8 +24,11 @@
 
 #include "completion.h"
 #include "metrics.hh"
-#include <asio.hpp>
-#include <asio/experimental/awaitable_operators.hpp>
+#include "task_asio.hh"
+#include <array>
+#include <asio/deferred.hpp>
+#include <asio/experimental/parallel_group.hpp>
+#include <asio/posix/stream_descriptor.hpp>
 #include <chrono>
 #include <fcntl.h>
 #include <unistd.h>
@@ -64,15 +67,16 @@ struct CompletionDriverMetrics {
 	}
 };
 
-// Optional Asio adapter. The generic journal and completion backend do not
-// depend on Asio. A single owner executor invokes one run() at a time.
+// Optional task adapter over Asio. The generic journal and completion backend depend on
+// neither. The driver belongs to one task::asio_scheduler; only tasks running on it may
+// call run(), and one at a time.
 template <class Queue>
 class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionDriver<Queue>> {
   public:
-	AsioCompletionDriver(asio::any_io_executor executor, std::shared_ptr<Queue> queue,
+	AsioCompletionDriver(task::asio_scheduler &scheduler, std::shared_ptr<Queue> queue,
 						 bool collect_metrics = false)
-		: executor_(std::move(executor)), queue_(std::move(queue)), notification_(executor_),
-		  timer_(executor_) {
+		: owner_(task::scheduler_ref::of(scheduler)), queue_(std::move(queue)),
+		  notification_(scheduler.executor()), timer_(scheduler.executor()) {
 		if (!queue_) {
 			throw std::invalid_argument("null completion queue");
 		}
@@ -98,29 +102,27 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 	CompletionDriverStats stats() const noexcept {
 		return metrics_ ? metrics_->snapshot() : CompletionDriverStats{};
 	}
-	asio::awaitable<void> run(std::shared_ptr<IOOperation> operation) {
+	task::task<void> run(std::shared_ptr<IOOperation> operation) {
 		return drive(std::move(operation), false);
 	}
 	// Reap exactly one original primitive, then return control to the owner.
 	// This supports operations with explicit paused scheduling boundaries.
-	asio::awaitable<void> run_one(std::shared_ptr<IOOperation> operation) {
+	task::task<void> run_one(std::shared_ptr<IOOperation> operation) {
 		return drive(std::move(operation), true);
 	}
 
   private:
-	asio::awaitable<void> drive(std::shared_ptr<IOOperation> operation, bool single) {
-		using namespace asio::experimental::awaitable_operators;
+	task::task<void> drive(std::shared_ptr<IOOperation> operation, bool single) {
 		auto lifetime = this->shared_from_this();
-		auto current_executor = co_await asio::this_coro::executor;
-		if (current_executor != executor_) {
-			throw std::logic_error("completion driver requires its owner executor");
+		if (task::current() != owner_) {
+			throw std::logic_error("completion driver requires its owner scheduler");
 		}
 		if (active_ || !operation || operation->in_flight()) {
 			throw std::logic_error("completion driver is not available");
 		}
-		// Request cancellation releases interest above this driver. It cannot
-		// destroy accepted IO buffers or skip the remaining durable barriers.
-		co_await asio::this_coro::reset_cancellation_state(asio::disable_cancellation());
+		// The drive takes no cancel token and awaits no operation with one. A request above
+		// it releases interest only: it cannot destroy accepted IO buffers or skip the
+		// remaining durable barriers.
 		active_ = true;
 		auto started = metrics_ ? Clock::now() : Clock::time_point{};
 		struct Reset {
@@ -132,7 +134,7 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 			// A fast backend still yields bounded owner turns to sockets and timers.
 			if (++immediate_steps == 16) {
 				immediate_steps = 0;
-				co_await asio::post(executor_, asio::use_awaitable);
+				co_await task::schedule_on{owner_};
 			}
 			auto primitive = operation->request().kind;
 			auto kind = static_cast<std::size_t>(primitive);
@@ -168,16 +170,26 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 				// Bounded polling also protects against a lost fallback wakeup.
 				// The descriptor provides prompt readiness where supported.
 				timer_.expires_after(std::chrono::milliseconds(1));
-				asio::error_code notification_error;
 				if (notification_failed_) {
-					co_await timer_.async_wait(asio::use_awaitable);
+					auto error = co_await task::await_asio<void(asio::error_code)>(
+						[&](auto handler) { timer_.async_wait(std::move(handler)); });
+					if (error) {
+						throw std::system_error(error);
+					}
 				} else {
-					co_await (notification_.async_wait(
-								  asio::posix::stream_descriptor::wait_read,
-								  asio::redirect_error(asio::use_awaitable, notification_error)) ||
-							  timer_.async_wait(asio::use_awaitable));
+					// The first of the two ends the wait; the other is cancelled and reaped.
+					auto [order, notification_error, timer_error] = co_await task::await_asio<void(
+						std::array<std::size_t, 2>, asio::error_code, asio::error_code)>([&](auto handler) {
+						asio::experimental::make_parallel_group(
+							notification_.async_wait(asio::posix::stream_descriptor::wait_read, asio::deferred),
+							timer_.async_wait(asio::deferred))
+							.async_wait(asio::experimental::wait_for_one(), std::move(handler));
+					});
 					if (notification_error && notification_error != asio::error::operation_aborted) {
 						notification_failed_ = true;
+					}
+					if (order[0] == 1 && timer_error) {
+						throw std::system_error(timer_error);
 					}
 				}
 			}
@@ -196,7 +208,7 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 		return elapsed > 0 ? static_cast<std::uint64_t>(elapsed) : 0;
 	}
 	std::unique_ptr<CompletionDriverMetrics> metrics_;
-	asio::any_io_executor executor_;
+	task::scheduler_ref owner_;
 	std::shared_ptr<Queue> queue_;
 	asio::posix::stream_descriptor notification_;
 	asio::steady_timer timer_;

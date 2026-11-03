@@ -4,11 +4,11 @@
 
 ## The contract
 
-New consumers include `completion/api.h` and use `kronuz::io::completion`. Link `completion::completion`, or `completion::asio` for the Asio adapter; the I/O types keep the `kronuz::journal` namespace they had when this module was part of the journal.
+New consumers include `completion/api.h` and use `kronuz::io::completion`. Link `completion::completion`, or `completion::asio` for the task driver; the I/O types keep the `kronuz::journal` namespace they had when this module was part of the journal.
 
 An operation owns every filename, buffer and file lease referenced by its request. Once a driver accepts a request, it retains that operation until the original primitive completes. Cancellation cannot fabricate a result, release accepted buffers, or refund outstanding admission. The owner consumes the typed result before deciding whether an obsolete consumer still needs a continuation. A failed driver with outstanding accepted work cannot safely pretend that work completed.
 
-`drive_synchronously()` executes the same primitives for synchronous callers and dedicated workers. Event-loop owners use native completion queues or the optional `completion::asio` adapter from `completion/asio_completion.h`; the host supplies standalone Asio. Opening the trusted directory and acquiring its stable owner lock are startup operations, not asynchronous job submissions.
+`drive_synchronously()` executes the same primitives for synchronous callers and dedicated workers. Event-loop owners use native completion queues or the optional `completion::asio` driver from `completion/asio_completion.h`, whose `run()` and `run_one()` return `task::task<void>` and must be awaited on the `task::asio_scheduler` the driver was built with; a task on any other scheduler gets `std::logic_error`. Opening the trusted directory and acquiring its stable owner lock are startup operations, not asynchronous job submissions.
 
 The POSIX backend requires a caller-created, exclusively owned directory with trusted ancestors. It rejects unsafe basenames, final-component symlinks, foreign-owned or multiply linked files, and group/world-writable entries. The root is held to the same standard by default: a final-component symlink (`O_NOFOLLOW`), a foreign owner, and a group/other-writable mode are refused. `PosixIOOptions` (`follow_root_symlink`, `allow_shared_directory`, both false) is additive: the first opens through a final symlink and holds the descriptor, so the directory cannot be re-resolved later; the second admits a foreign owner and a shared-writable mode. `IO::directory_trust()` returns a `DirectoryTrust` (`known`, `symlinked_root`, `foreign_owner`, `shared_writable`; `trusted()`) from what the constructor saw on the held descriptor; the base default is unknown (`known == false`, not trusted), so a wrapper forwards it as it does `directory_filesystem()`. Entries inside the directory stay `O_NOFOLLOW` under every option. Creation remains exclusive and defaults to mode `0600`; an additive constructor argument allows `0640` or `0644` for shared artifacts. The selected permissions are applied before successful creation completes, independently of umask; `owner.lock` always remains `0600`. File synchronization and directory synchronization are separate primitives: replacing a filename does not by itself establish a durable publication.
 
@@ -69,7 +69,7 @@ These appended primitives use bounded fallback execution on both native drivers.
 
 ## Coroutine extension dispatch
 
-The optional `AsioCompletionDriver` accepts the same supported primitive set as native queues. Its original twelve-element latency arrays and `completion_primitive_count` remain unchanged; separate extension arrays expose success/error latency snapshots for appended kinds. An unsupported kind fails before submission, with driver availability restored.
+The optional `AsioCompletionDriver` accepts the same supported primitive set as native queues. Its original twelve-element latency arrays and `completion_primitive_count` remain unchanged; separate extension arrays expose success/error latency snapshots for appended kinds. An unsupported kind fails before submission, with driver availability restored. `run()` and `run_one()` take no cancel token and await no operation with one: a request above the driver releases interest only, so the original always completes its steps and its durable barriers. Every 16 immediate steps the drive requeues itself on the owner scheduler so sockets and timers get a turn.
 
 ## Explicit directory-cursor settlement
 

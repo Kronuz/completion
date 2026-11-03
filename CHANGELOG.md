@@ -10,6 +10,22 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
 
 ### Changed
 
+- **Breaking.** `AsioCompletionDriver::run()` and `run_one()` return `task::task<void>`, not
+  `asio::awaitable<void>`; `task::task` is the family's only coroutine type. The constructor takes
+  the owner `task::asio_scheduler&` instead of an `asio::any_io_executor`, and the scheduler must
+  outlive the driver. A task awaiting `run()` must be running on that scheduler, as the
+  awaitable had to run on the owner executor; any other gets `std::logic_error`, thrown when it
+  awaits. Spawn the call with `task::spawn(task::scheduler_ref::of(scheduler), ...)` where
+  `asio::co_spawn(executor, ...)` was. Behavior, statistics and cancellation semantics are
+  unchanged: the drive ignores a cancel request and completes its original, and the 16-step yield
+  and the 1 ms poll fallback stay.
+- `completion::asio` links `task::asio` and builds when `COMPLETION_ASIO` is on (the default for a
+  top-level build; a dependent sets it before `FetchContent_MakeAvailable`). It fetches
+  [task](https://github.com/Kronuz/task) at `d3d94f3`, which fetches Asio 1.36.0 unless
+  `ASIO_INCLUDE_DIR` names a checkout. The core `completion::completion` is unchanged and needs
+  neither. `asio_completion.h` includes the Asio headers it uses, not `<asio.hpp>`.
+- The driver's test now runs in CI: it covers the scheduler a `run()` resumes on, the owner yield
+  and a request mid-drive.
 - Pins metrics at `db490b4` and allocators at `07de45d`, their heads; both moves past `d7d4c4d`
   and `6eb7fb2` are docs only.
 
