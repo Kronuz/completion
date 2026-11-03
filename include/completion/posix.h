@@ -129,20 +129,26 @@ inline EntryInspection inspect_status(const struct stat& status) {
 		static_cast<std::uint64_t>(status.st_uid), static_cast<std::uint64_t>(status.st_nlink),
 		static_cast<std::uint32_t>(status.st_mode & 07777)};
 }
-#ifdef __APPLE__
-// The sync system calls (fsync and fcntl) PosixIO issues; a test replaces them through
-// PosixIO::replace_sync_calls to record the real call sequence.
+// The sync system calls PosixIO issues; a test replaces them through PosixIO::replace_sync_calls
+// to record the real call sequence on this platform.
 using FsyncCall = int (*)(int fd);
+#ifdef __APPLE__
 using FcntlCall = int (*)(int fd, int command);
 inline int default_fcntl(int fd, int command) { return ::fcntl(fd, command); }
 // Errors a filesystem without F_BARRIERFSYNC returns: the vnode default is ENOTSUP and an
 // unrecognised command is ENOTTY (ENOTTY observed on APFS, FAT and exFAT volumes).
 inline bool barrier_unsupported(int error) { return error == ENOTSUP || error == EOPNOTSUPP || error == ENOTTY; }
-struct DeviceSyncCalls {
+#endif
+#ifdef __linux__
+using WritebackCall = int (*)(int fd);
+inline int default_writeback(int fd) { return ::sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE); }
+#endif
+struct SyncCalls {
 	FsyncCall fsync_call = &::fsync;
+	int sync(int fd) const { return fsync_call(fd); }
+#ifdef __APPLE__
 	FcntlCall fcntl_call = &default_fcntl;
 	int stat(int fd, struct stat* status) const { return ::fstat(fd, status); }
-	int sync(int fd) const { return fsync_call(fd); }
 	int full_sync(int fd) const { return fcntl_call(fd, F_FULLFSYNC); }
 	// F_BARRIERFSYNC; the stronger full flush only where the filesystem lacks the call. Any
 	// other error (EIO, ...) is the barrier's own failure and is returned, never retried.
@@ -153,8 +159,12 @@ struct DeviceSyncCalls {
 		do { result = full_sync(fd); } while (result < 0 && errno == EINTR);
 		return result;
 	}
-};
 #endif
+#ifdef __linux__
+	WritebackCall writeback_call = &default_writeback;
+	int writeback(int fd) const { return writeback_call(fd); }
+#endif
+};
 inline void file_sync(int fd) {
 	int result;
 #ifdef __APPLE__
@@ -227,17 +237,20 @@ template <class Calls> inline void files_sync_devices(std::span<const int> fds, 
 	files_sync_devices(fds, -1, -1, SyncMode::durable, calls);
 }
 // macOS stages every file before flushing each distinct device; Linux starts writeback
-// on every file before the first fsync waits.
-inline void files_sync(std::span<const int> fds) {
+// on every file before the first fsync waits; elsewhere each file is fsync'd in order.
+template <class Calls> inline void files_sync(std::span<const int> fds, Calls& calls) {
 	if (fds.empty()) { return; }
 #ifdef __APPLE__
-	DeviceSyncCalls calls;
 	files_sync_devices(fds, calls);
 #else
 #ifdef __linux__
-	for (int fd : fds) { (void)::sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE); }  // a hint; fsync reports errors
+	for (int fd : fds) { (void)calls.writeback(fd); }  // a hint; fsync reports errors
 #endif
-	for (int fd : fds) { file_sync(fd); }
+	for (int fd : fds) {
+		int result;
+		do { result = calls.sync(fd); } while (result < 0 && errno == EINTR);
+		if (result < 0) { system_failure("durably sync journal file"); }
+	}
 #endif
 }
 // Linux f_type: an allow-list of known-local filesystems; the others listed are only named.
@@ -492,12 +505,22 @@ public:
 	using FlockCall = int (*)(int fd, int operation);
 	// A test seam: the flock answer every owner-lock step reports; null is flock.
 	void replace_flock(FlockCall call) noexcept { flock_ = call ? call : &::flock; }
+	// A test seam: the system calls the sync paths issue on this platform; null is the system
+	// call. Call before any sync. macOS: fsync and fcntl (F_FULLFSYNC, F_BARRIERFSYNC); Linux:
+	// fsync and the sync_file_range writeback hint; elsewhere: fsync.
 #ifdef __APPLE__
-	// A test seam: the fsync and fcntl (F_FULLFSYNC, F_BARRIERFSYNC) calls the sync paths
-	// issue; null is the system call. Call before any sync.
 	void replace_sync_calls(detail::FsyncCall fsync_call, detail::FcntlCall fcntl_call) noexcept {
 		sync_calls_.fsync_call = fsync_call ? fsync_call : &::fsync;
 		sync_calls_.fcntl_call = fcntl_call ? fcntl_call : &detail::default_fcntl;
+	}
+#elif defined(__linux__)
+	void replace_sync_calls(detail::FsyncCall fsync_call, detail::WritebackCall writeback_call) noexcept {
+		sync_calls_.fsync_call = fsync_call ? fsync_call : &::fsync;
+		sync_calls_.writeback_call = writeback_call ? writeback_call : &detail::default_writeback;
+	}
+#else
+	void replace_sync_calls(detail::FsyncCall fsync_call) noexcept {
+		sync_calls_.fsync_call = fsync_call ? fsync_call : &::fsync;
 	}
 #endif
 #ifdef KRONUZ_COMPLETION_STATFS
@@ -535,6 +558,7 @@ public:
 		target.install(directory);
 	}
 	std::unique_ptr<File> open_existing(std::string_view name) override { return file(name, false); }
+	std::unique_ptr<File> open_existing_read_only(std::string_view name) override { return file(name, false, true); }
 	std::unique_ptr<File> create_exclusive(std::string_view name) override { return file(name, true); }
 	void replace(std::string_view source, std::string_view destination) override {
 		detail::PosixName from(source), to(destination);
@@ -586,11 +610,7 @@ public:
 				file->sync();
 			}
 		}
-#ifdef __APPLE__
-		if (!fds.empty()) { detail::files_sync_devices(fds, sync_calls_); }
-#else
-		detail::files_sync(fds);
-#endif
+		detail::files_sync(fds, sync_calls_);
 	}
 	// macOS: one device flush shared by the files and the directory entries.
 	void sync_files_and_directory(std::span<File* const> files) override {
@@ -613,11 +633,7 @@ public:
 	}
 	void sync_directory() override {
 		int result;
-#ifdef __APPLE__
 		do { result = sync_calls_.sync(directory_); } while (result < 0 && errno == EINTR);
-#else
-		do { result = ::fsync(directory_); } while (result < 0 && errno == EINTR);
-#endif
 		if (result < 0) { detail::system_failure("sync journal directory"); }
 #ifdef __APPLE__
 		// Directory fsync establishes namespace ordering; fullsync then asks the storage
@@ -726,9 +742,9 @@ private:
 		}
 		throw std::system_error(error, std::generic_category(), operation);
 	}
-	int open_file(std::string_view name, bool create) {
+	int open_file(std::string_view name, bool create, bool read_only = false) {
 		detail::PosixName component(name);
-		int flags = O_RDWR | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
+		int flags = (read_only ? O_RDONLY : O_RDWR) | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK;
 		if (create) { flags |= O_CREAT | O_EXCL; }
 		int fd;
 		do { fd = ::openat(directory_, component.c_str(), flags, 0600); } while (fd < 0 && errno == EINTR);
@@ -751,9 +767,9 @@ private:
 		catch (...) { ::close(fd); throw; }
 		return fd;
 	}
-	std::unique_ptr<File> file(std::string_view name, bool create) {
+	std::unique_ptr<File> file(std::string_view name, bool create, bool read_only = false) {
 		auto result = control<detail::PosixFile>(-1);
-		result->install(open_file(name, create));
+		result->install(open_file(name, create, read_only));
 		return result;
 	}
 	template <class T, class... Args> std::unique_ptr<T> control(Args&&... args) {
@@ -769,9 +785,7 @@ private:
 	std::atomic<bool> file_claimed_{false}, directory_claimed_{false};
 	DirectoryTrust trust_;
 	FlockCall flock_ = &::flock;
-#ifdef __APPLE__
-	detail::DeviceSyncCalls sync_calls_;
-#endif
+	detail::SyncCalls sync_calls_;
 #ifdef KRONUZ_COMPLETION_STATFS
 	StatfsCall statfs_ = nullptr;
 #endif
