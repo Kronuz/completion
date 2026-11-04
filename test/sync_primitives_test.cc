@@ -296,7 +296,7 @@ void read_only_opens(const std::filesystem::path &base) {
 		};
 		for (auto kind : {c::Kind::Open, c::Kind::OpenCandidate}) {
 			auto result = open(kind, nullptr);
-			check(result.file, "the open returns a file");
+			check(static_cast<bool>(result.file), "the open returns a file");
 			if (read_only) {
 				refuses_and_reads(*result.file, "a read-only Open or OpenCandidate refuses writes");
 				check(result.file->try_lease(c::LeaseMode::Exclusive), "a read-only descriptor takes a lease");
