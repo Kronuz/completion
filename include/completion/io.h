@@ -206,10 +206,6 @@ public:
 	virtual bool open_reclaim_candidate_into(std::string_view, File&) { throw std::logic_error("reusable candidate open unsupported"); }
 	virtual void scan_directory_into(DirectoryCursor&) { throw std::logic_error("reusable cursor scan unsupported"); }
 	virtual std::unique_ptr<File> open_existing(std::string_view name) = 0;
-	// A descriptor opened without write access: it reads, syncs (sync_files_and_directory,
-	// order_files_and_directory) and closes, and write_at and truncate fail. Opening it does not
-	// copy the file up on a copy-on-write layer (overlayfs).
-	virtual std::unique_ptr<File> open_existing_read_only(std::string_view) { throw std::logic_error("read-only open unsupported"); }
 	virtual std::unique_ptr<File> create_exclusive(std::string_view name) = 0;
 	virtual void replace(std::string_view source, std::string_view destination) = 0;
 	// Missing files are an idempotent success.

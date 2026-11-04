@@ -44,7 +44,6 @@ struct State {
 	std::unique_ptr<c::DirectoryCursor> reusable_cursor;
 	std::array<char, 255> name{};
 	std::optional<c::EntryInspection> named;
-	std::vector<std::shared_ptr<c::File>> group;
 	std::exception_ptr error;
 	unsigned completed = 0;
 	std::function<void()> on_completed;
@@ -129,10 +128,6 @@ class Operation final : public c::Operation {
 		if (!single_ && request_.kind == c::Kind::CreateInto)
 			request_.source = "created";
 		request_.destination_bytes = state_->name;
-		if (!single_ && (request_.kind == c::Kind::SyncFiles || request_.kind == c::Kind::OrderFiles)) {
-			request_.files = state_->group;
-			return;
-		}
 		if (step_ >= 12 && !single_) {
 			request_.cursor = std::shared_ptr<c::DirectoryCursor>(state_, state_->reusable_cursor.get());
 			request_.file = std::shared_ptr<c::File>(state_, state_->reusable_file.get());
@@ -149,7 +144,7 @@ class Operation final : public c::Operation {
 		c::Kind::Open,	   c::Kind::ExclusiveLease, c::Kind::CloseFile,			c::Kind::CloseCursor,
 		c::Kind::OpenInto, c::Kind::CloseFile,		c::Kind::OpenCandidateInto, c::Kind::CloseFile,
 		c::Kind::ScanInto, c::Kind::NextInto,		c::Kind::CloseCursor,		c::Kind::CreateInto,
-		c::Kind::CloseFile, c::Kind::SyncFiles,		c::Kind::OrderFiles};
+		c::Kind::CloseFile};
 	std::shared_ptr<State> state_;
 	std::optional<c::Kind> single_;
 	c::Request request_;
@@ -379,7 +374,6 @@ int main(int argc, char **argv) {
 			state->io = backend;
 			state->reusable_file = backend->make_closed_file();
 			state->reusable_cursor = backend->make_closed_cursor();
-			state->group.push_back(backend->open_existing_read_only("anchor"));
 			auto operation = std::make_shared<Operation>(state);
 			std::weak_ptr<Operation> weak = operation;
 			std::exception_ptr failure;
@@ -397,7 +391,7 @@ int main(int argc, char **argv) {
 				std::rethrow_exception(failure);
 			if (state->error)
 				std::rethrow_exception(state->error);
-			check(done && weak.expired() && state->completed == 23 && !queue->busy());
+			check(done && weak.expired() && state->completed == 21 && !queue->busy());
 			check(driver->stats().submitted_to_reaped.size() == 12);
 			context.restart();
 			auto invalid = std::make_shared<Operation>(state, static_cast<c::Kind>(999));

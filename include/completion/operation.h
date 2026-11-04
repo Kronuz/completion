@@ -25,8 +25,6 @@
 #include "io.h"
 #include <array>
 #include <exception>
-#include <span>
-#include <vector>
 
 namespace kronuz::journal {
 
@@ -38,7 +36,7 @@ struct MutationToken {
 	bool operator==(const MutationToken &) const = default;
 };
 
-enum class PrimitiveKind { Write, Sync, Create, Replace, DirectorySync, Read, Open, Size, Scan, Next, OpenCandidate, Remove, NextInto, InspectEntry, InspectFile, SharedLease, ExclusiveLease, CloseFile, CloseCursor, OpenInto, OpenCandidateInto, ScanInto, CreateInto, SyncFiles, OrderFiles };
+enum class PrimitiveKind { Write, Sync, Create, Replace, DirectorySync, Read, Open, Size, Scan, Next, OpenCandidate, Remove, NextInto, InspectEntry, InspectFile, SharedLease, ExclusiveLease, CloseFile, CloseCursor, OpenInto, OpenCandidateInto, ScanInto, CreateInto };
 
 // Views belong to the operation. An accepted driver retains that operation
 // until the original primitive completes, including after cancellation.
@@ -46,8 +44,6 @@ struct MutationRequest {
 	MutationToken token;
 	PrimitiveKind kind = PrimitiveKind::Sync;
 	std::shared_ptr<File> file;
-	// SyncFiles and OrderFiles: the group, read-only or read-write, with the IO's directory.
-	std::span<const std::shared_ptr<File>> files;
 	std::uint64_t offset = 0;
 	std::string_view bytes, source, destination;
 	std::span<char> destination_bytes;
@@ -154,18 +150,6 @@ inline MutationCompletion execute_primitive(IO &io, const MutationRequest &reque
 		case PrimitiveKind::DirectorySync:
 			io.sync_directory();
 			break;
-		case PrimitiveKind::SyncFiles:
-		case PrimitiveKind::OrderFiles: {
-			std::vector<File *> group;
-			group.reserve(request.files.size());
-			for (const auto &file : request.files) {
-				if (!file) { throw std::invalid_argument("a file group holds a null file"); }
-				group.push_back(file.get());
-			}
-			if (request.kind == PrimitiveKind::SyncFiles) { io.sync_files_and_directory(group); }
-			else { io.order_files_and_directory(group); }
-			break;
-		}
 		}
 	} catch (...) {
 		result.error = std::current_exception();

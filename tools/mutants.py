@@ -1,15 +1,14 @@
 #!/usr/bin/env python3
 # Copyright (c) 2026 Germán Méndez Bravo (Kronuz)
 # SPDX-License-Identifier: MIT
-"""Mutation check of the owner lock and the SyncFiles and OrderFiles primitives.
+"""Mutation check of the owner lock.
 
 Applies each of 14 small breaks to the owner-lock code (include/completion/posix.h and io.h)
 in a scratch copy of the repository, rebuilds the CTest suite, runs it, and requires the
 outcome to be the one expected: the suite fails (the mutant is killed) or, for the mutants
 whose break nothing can observe, passes (it survives). The 14 are the ones the CL-2 review
-(docs/reviews/cl-2-code.md, finding CL2-5) listed; s1 to s6 break the sync primitives (the device
-flush, the ordering barrier, the directory sync, a file's fsync, which primitive runs); each is an
-exact-anchor replacement that must match exactly once.
+(docs/reviews/cl-2-code.md, finding CL2-5) listed; each is an exact-anchor replacement that
+must match exactly once.
 
   python3 tools/mutants.py                run all, in a copy under the temp directory
   python3 tools/mutants.py --only m1,m6   run some
@@ -34,7 +33,6 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 POSIX = "include/completion/posix.h"
 IO = "include/completion/io.h"
-OPERATION = "include/completion/operation.h"
 
 
 class Mutant:
@@ -127,36 +125,6 @@ MUTANTS = [
     Mutant("m14", "owner_fd_ not recorded", POSIX, '\t\t\towner_fd_.store(owner->fd());', '',
            expect={"Darwin": "killed", "default": "survived"},
            why="only the macOS directory sync reads owner_fd_ (it flushes through the owner file)"),
-    Mutant("s1", "no device flush after the staged fsyncs", POSIX,
-           '\t\t\tdo { result = calls.full_sync(devices[i].fd); } while (result < 0 && errno == EINTR);',
-           '\t\t\tdo { result = 0; } while (result < 0 && errno == EINTR);',
-           expect={"Darwin": "killed", "default": "survived"},
-           why="macOS only: the one F_FULLFSYNC of SyncFiles is missing from the recorded sequence"),
-    Mutant("s2", "no ordering barrier", POSIX,
-           '\t\t\tdo { result = calls.barrier(devices[i].fd); } while (result < 0 && errno == EINTR);',
-           '\t\t\tdo { result = 0; } while (result < 0 && errno == EINTR);',
-           expect={"Darwin": "killed", "default": "survived"},
-           why="macOS only: the one F_BARRIERFSYNC of OrderFiles is missing from the recorded sequence"),
-    Mutant("s3", "SyncFiles skips the directory sync", OPERATION,
-           '\t\t\tif (request.kind == PrimitiveKind::SyncFiles) { io.sync_files_and_directory(group); }',
-           '\t\t\tif (request.kind == PrimitiveKind::SyncFiles) { io.sync_files(group); }',
-           why="the recorded sequence ends without the directory fsync"),
-    Mutant("s4", "OrderFiles runs the durable path", OPERATION,
-           '\t\t\telse { io.order_files_and_directory(group); }',
-           '\t\t\telse { io.sync_files_and_directory(group); }',
-           expect={"Darwin": "killed", "default": "survived"},
-           why="only macOS orders with a barrier instead of a full flush; elsewhere the two sequences are equal"),
-    Mutant("s5", "sync_directory skips the directory fsync", POSIX,
-           '\t\tdo { result = sync_calls_.sync(directory_); } while (result < 0 && errno == EINTR);',
-           '\t\tresult = 0;',
-           why="a group of no files syncs nothing"),
-    Mutant("s6", "files_sync skips the first-pass fsync", POSIX,
-           lines('\t\tdo { result = calls.sync(fd); } while (result < 0 && errno == EINTR);',
-                 '\t\tif (result < 0) { system_failure("durably sync journal file"); }'),
-           lines('\t\tresult = 0;',
-                 '\t\tif (result < 0) { system_failure("durably sync journal file"); }'),
-           expect={"Darwin": "survived", "default": "killed"},
-           why="Linux and FreeBSD only: files_sync is their per-file fsync loop; macOS stages through files_sync_devices"),
 ]
 
 
@@ -213,7 +181,7 @@ def main():
     work = Path(tempfile.mkdtemp(prefix="completion-mutants-"))
     sources = work / "src"
     try:
-        shutil.copytree(ROOT, sources, ignore=shutil.ignore_patterns(".git", ".scratch", "build*", "docs"))
+        shutil.copytree(ROOT, sources, ignore=shutil.ignore_patterns(".git", "build*", "docs"))
         build = work / "build"
         configure = ["cmake", "-S", str(sources), "-B", str(build), "-DCMAKE_BUILD_TYPE=RelWithDebInfo",
                      "-DCMAKE_CXX_FLAGS_RELWITHDEBINFO=-O1 -g0"] + args.cmake_arg

@@ -4,7 +4,7 @@
 
 A commit that publishes a manifest by rename needs three facts in order: the data files are on the media, the manifest temporary is on the media, and only then the rename reaches the media. On macOS a full flush (`F_FULLFSYNC`) costs about 20 ms, so the naive protocol (a flush per step, four per commit) dominates the commit. `PosixIO` reduces it to one `F_FULLFSYNC` and one `F_BARRIERFSYNC`.
 
-Linux and FreeBSD are unchanged: both calls run `sync_files` and then `sync_directory` there. The asynchronous driver runs them as one primitive each (`sync-files.md`).
+Linux and FreeBSD are unchanged: both calls run `sync_files` and then `sync_directory` there (`posix.h:596-612`).
 
 ## How it works
 

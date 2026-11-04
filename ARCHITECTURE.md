@@ -93,6 +93,4 @@ An authentic Create result's file is adopted before handling an accompanying err
 
 `CreateInto` creates a new exclusive file using a fresh closed control supplied by the caller. The separate `reusable_create` capability defaults to unsupported; the existing seven-capability collector `complete()` predicate remains unchanged. POSIX rejects live and wrong-backend controls before native creation. A failed call leaves a valid closed destination closed, but may leave a namespace artifact, so applications retain conservative disk debt.
 
-`SyncFiles` and `OrderFiles` run `IO::sync_files_and_directory` and `IO::order_files_and_directory` over `MutationRequest::files`, a group of read-only or read-write files in the IO's one directory, as one primitive each. They run on the fallback worker in both native queues. `docs/mechanisms/sync-files.md` has each platform's call sequence and what an error leaves undone.
-
 Context-taking image preparation overloads accept that closed control and use `CloseAfterSeal`. The control, payload and operation state are admitted before Create. Cancellation after an accepted Create consumes its authentic result and closes the handle on the worker before termination. Existing constructors and retained-file behavior remain unchanged. Hosts must supply a fresh control from the same backend and retain the whole operation through cleanup.
