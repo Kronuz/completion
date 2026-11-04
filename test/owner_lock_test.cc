@@ -536,6 +536,10 @@ struct LegacyIO final : j::IO {
 	int calls = 0;
 	std::unique_ptr<j::OwnerLock> acquire_owner(bool) override { ++calls; throw std::logic_error("unused"); }
 	std::unique_ptr<j::File> open_existing(std::string_view) override { throw std::logic_error("unused"); }
+	std::unique_ptr<j::File> open_existing_read_only(std::string_view) override { throw std::logic_error("unused"); }
+	void open_existing_read_only_into(std::string_view, j::File&) override { throw std::logic_error("unused"); }
+	bool open_reclaim_candidate_read_only_into(std::string_view, j::File&) override { throw std::logic_error("unused"); }
+	std::unique_ptr<j::File> open_reclaim_candidate_read_only(std::string_view) override { throw std::logic_error("unused"); }
 	std::unique_ptr<j::File> create_exclusive(std::string_view) override { throw std::logic_error("unused"); }
 	void replace(std::string_view, std::string_view) override { throw std::logic_error("unused"); }
 	void remove(std::string_view) override { throw std::logic_error("unused"); }
@@ -546,6 +550,10 @@ struct WrapperIO final : j::IO {
 	j::IO& inner;
 	std::unique_ptr<j::OwnerLock> acquire_owner(bool create) override { return inner.acquire_owner(create); }
 	std::unique_ptr<j::File> open_existing(std::string_view) override { throw std::logic_error("unused"); }
+	std::unique_ptr<j::File> open_existing_read_only(std::string_view) override { throw std::logic_error("unused"); }
+	void open_existing_read_only_into(std::string_view, j::File&) override { throw std::logic_error("unused"); }
+	bool open_reclaim_candidate_read_only_into(std::string_view, j::File&) override { throw std::logic_error("unused"); }
+	std::unique_ptr<j::File> open_reclaim_candidate_read_only(std::string_view) override { throw std::logic_error("unused"); }
 	std::unique_ptr<j::File> create_exclusive(std::string_view) override { throw std::logic_error("unused"); }
 	void replace(std::string_view, std::string_view) override { throw std::logic_error("unused"); }
 	void remove(std::string_view) override { throw std::logic_error("unused"); }
