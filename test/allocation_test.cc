@@ -63,10 +63,6 @@ class UnusedIO final : public c::IO {
   public:
 	std::unique_ptr<c::OwnerLock> acquire_owner(bool) override { throw std::logic_error("unused"); }
 	std::unique_ptr<c::File> open_existing(std::string_view) override { throw std::logic_error("unused"); }
-	std::unique_ptr<c::File> open_existing_read_only(std::string_view) override { throw std::logic_error("unused"); }
-	void open_existing_read_only_into(std::string_view, c::File&) override { throw std::logic_error("unused"); }
-	bool open_reclaim_candidate_read_only_into(std::string_view, c::File&) override { throw std::logic_error("unused"); }
-	std::unique_ptr<c::File> open_reclaim_candidate_read_only(std::string_view) override { throw std::logic_error("unused"); }
 	std::unique_ptr<c::File> create_exclusive(std::string_view) override { throw std::logic_error("unused"); }
 	void replace(std::string_view, std::string_view) override { throw std::logic_error("unused"); }
 	void remove(std::string_view) override { throw std::logic_error("unused"); }

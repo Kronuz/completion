@@ -72,7 +72,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
       "-DINCLUDES=$<JOIN:$<TARGET_PROPERTY:completion,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:metrics::metrics,INTERFACE_INCLUDE_DIRECTORIES>;$<TARGET_PROPERTY:allocators::resources,INTERFACE_INCLUDE_DIRECTORIES>,|>"
       -P ${CMAKE_CURRENT_SOURCE_DIR}/test/owner_braced_check.cmake)
     # tools/mutants.py: every owner-lock mutant's anchor still occurs exactly once. Running the mutants
-    # (`python3 tools/mutants.py`) rebuilds the suite once per mutant and is not a test.
+    # (`python3 tools/mutants.py`) rebuilds the suite 14 times and is not a test.
     find_package(Python3 COMPONENTS Interpreter QUIET)
     if(Python3_Interpreter_FOUND)
       add_test(NAME completion_mutants_anchors COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/mutants.py --check)
