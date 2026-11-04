@@ -4,7 +4,7 @@ Detent step S1 (`Detent/docs/status/namespace-design.md`, "S1 (completion `SyncF
 
 ## State
 
-Implemented; local macOS arm64 suite green. Not merged, pin not moved (the lead lands it).
+Implemented through criterion 1a. CI run 41746149943 (all 9 jobs) and mutants run 41746153588 (Linux and macOS, 22 mutants) green at completion:1ffecd7; local macOS arm64 default, ASan+UBSan and TSan builds 20 of 20 each at the same source. Not merged, pin not moved (the lead lands it). The branch carries one empty commit (`Record mutant results in the S1 ledger`); squash on landing.
 
 ## Done
 
