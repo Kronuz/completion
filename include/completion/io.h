@@ -204,6 +204,10 @@ public:
 	virtual std::unique_ptr<DirectoryCursor> make_closed_cursor() { throw std::logic_error("reusable cursor controls unsupported"); }
 	virtual void open_existing_into(std::string_view, File&) { throw std::logic_error("reusable file open unsupported"); }
 	virtual bool open_reclaim_candidate_into(std::string_view, File&) { throw std::logic_error("reusable candidate open unsupported"); }
+	// The read-only forms of the three opens above, for MutationRequest::read_only.
+	virtual void open_existing_read_only_into(std::string_view, File&) { throw std::logic_error("reusable read-only open unsupported"); }
+	virtual bool open_reclaim_candidate_read_only_into(std::string_view, File&) { throw std::logic_error("reusable read-only candidate open unsupported"); }
+	virtual std::unique_ptr<File> open_reclaim_candidate_read_only(std::string_view) { throw std::logic_error("read-only candidate open unsupported"); }
 	virtual void scan_directory_into(DirectoryCursor&) { throw std::logic_error("reusable cursor scan unsupported"); }
 	virtual std::unique_ptr<File> open_existing(std::string_view name) = 0;
 	// A descriptor opened without write access: it reads, syncs (sync_files_and_directory,

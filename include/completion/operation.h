@@ -48,6 +48,8 @@ struct MutationRequest {
 	std::shared_ptr<File> file;
 	// SyncFiles and OrderFiles: the group, read-only or read-write, with the IO's directory.
 	std::span<const std::shared_ptr<File>> files;
+	// Open, OpenInto, OpenCandidate and OpenCandidateInto: open without write access.
+	bool read_only = false;
 	std::uint64_t offset = 0;
 	std::string_view bytes, source, destination;
 	std::span<char> destination_bytes;
@@ -87,11 +89,13 @@ inline MutationCompletion execute_primitive(IO &io, const MutationRequest &reque
 			break;
 		case PrimitiveKind::OpenInto:
 			if (!request.file) { throw std::invalid_argument("reusable open requires a file control"); }
-			io.open_existing_into(request.source, *request.file);
+			if (request.read_only) { io.open_existing_read_only_into(request.source, *request.file); }
+			else { io.open_existing_into(request.source, *request.file); }
 			break;
 		case PrimitiveKind::OpenCandidateInto:
 			if (!request.file) { throw std::invalid_argument("candidate open requires a file control"); }
-			result.count = io.open_reclaim_candidate_into(request.source, *request.file) ? 1 : 0;
+			result.count = (request.read_only ? io.open_reclaim_candidate_read_only_into(request.source, *request.file)
+													: io.open_reclaim_candidate_into(request.source, *request.file)) ? 1 : 0;
 			break;
 		case PrimitiveKind::ScanInto:
 			if (!request.cursor) { throw std::invalid_argument("reusable scan requires a cursor control"); }
@@ -126,10 +130,12 @@ inline MutationCompletion execute_primitive(IO &io, const MutationRequest &reque
 			result.count = size.value_or(0); // Zero is end; basenames cannot be empty.
 			break;
 		}
-		case PrimitiveKind::OpenCandidate: result.file = io.open_reclaim_candidate(request.source); break;
+		case PrimitiveKind::OpenCandidate:
+			result.file = request.read_only ? io.open_reclaim_candidate_read_only(request.source) : io.open_reclaim_candidate(request.source);
+			break;
 		case PrimitiveKind::Remove: io.remove(request.source); break;
 		case PrimitiveKind::Open:
-			result.file = io.open_existing(request.source);
+			result.file = request.read_only ? io.open_existing_read_only(request.source) : io.open_existing(request.source);
 			break;
 		case PrimitiveKind::Size:
 			result.length = request.file->size();
