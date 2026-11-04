@@ -19,7 +19,7 @@ All four S1 criteria are met, pending the lead's review. Evidence per criterion:
 
 1. D11 says each group syncs "the way `IO::sync_files` does". The code runs `sync_files_and_directory`, which also syncs the directory (macOS: inside the same device flush), as the design's own library-change paragraph states.
 2. ND-R5 offered a primitive spanning directories or D8 in one directory; L1 chose one directory. Files outside the IO's directory are unsupported.
-3. ND-R6 asked for read-only descriptors; added `IO::open_existing_read_only` (default throws `logic_error`; `PosixIO` opens `O_RDONLY`). Wrapper IOs (strata's counted IO, faultfs) do not forward it until they add the override.
+3. ND-R6 asked for read-only descriptors; added `IO::open_existing_read_only` (`PosixIO` opens `O_RDONLY`), with the three Into/candidate forms. All four are pure virtual, so an `IO` that lacks them does not compile: strata's counted IO and faultfs must add them in the wave that moves strata's completion pin.
 4. D11 expects batching on Linux and FreeBSD to amortize; it does not. They fsync per file and then the directory (N+1 filesystem fsyncs, each a device flush on ext4/XFS with barriers). Unmeasured; T2 decides whether concurrent fsyncs are needed.
 5. The sync seam existed on macOS only; it now exists on Linux (`fsync`, `sync_file_range` hint) and FreeBSD (`fsync`) so each platform records its own sequence. `detail::DeviceSyncCalls` is renamed `detail::SyncCalls`.
 6. Neither native queue has an opcode for a group: both run these kinds on the fallback worker (`fallback_extensions`).
