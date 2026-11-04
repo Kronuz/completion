@@ -36,6 +36,8 @@ void check(bool value) {
 	if (!value)
 		throw std::runtime_error("Asio extension invariant failed");
 }
+// The primitives one Operation drives: the kinds_ below.
+constexpr unsigned steps = 23;
 struct State {
 	std::shared_ptr<c::IO> io;
 	std::unique_ptr<j::DirectoryCursor> cursor;
@@ -218,6 +220,7 @@ std::shared_ptr<State> make_state(const std::shared_ptr<c::PosixIO> &backend) {
 	state->io = backend;
 	state->reusable_file = backend->make_closed_file();
 	state->reusable_cursor = backend->make_closed_cursor();
+	state->group.push_back(backend->open_existing_read_only("anchor"));
 	return state;
 }
 void run_to_end(asio::io_context &context, task::asio_scheduler &scheduler, task::task<void> work) {
@@ -294,7 +297,7 @@ void scheduler_homes(const std::shared_ptr<c::PosixIO> &backend) {
 	other_thread.join();
 	if (failure)
 		std::rethrow_exception(failure);
-	check(state->completed == 21 && !queue->busy());
+	check(state->completed == steps && !queue->busy());
 }
 
 // A fast backend yields to the owner's queue every 16 steps: work posted at step 3 runs after
@@ -317,7 +320,7 @@ void yields_to_owner(const std::shared_ptr<c::PosixIO> &backend) {
 		}
 	};
 	run_to_end(context, scheduler, driver->run(std::make_shared<Operation>(state)));
-	check(ran && seen == 15 && state->completed == 21);
+	check(ran && seen == 15 && state->completed == steps);
 }
 
 // Smoke test: run() takes no cancel token, so a request made while the drive waits cannot reach
@@ -327,8 +330,8 @@ task::task<void> uncancelled_drive(std::shared_ptr<j::AsioCompletionDriver<HeldQ
 								   std::shared_ptr<HeldQueue> queue, task::cancel_source &source,
 								   asio::steady_timer &timer, unsigned &completed_at_request) {
 	co_await driver->run(operation);
-	check(completed_at_request < 21 && source.token().requested());
-	check(operation->done() && !operation->in_flight() && !queue->busy() && state->completed == 21);
+	check(completed_at_request < steps && source.token().requested());
+	check(operation->done() && !operation->in_flight() && !queue->busy() && state->completed == steps);
 	auto error = co_await task::await_asio<void(asio::error_code)>(
 		[&](auto handler) { timer.async_wait(std::move(handler)); }, source.token());
 	check(error == asio::error::operation_aborted);
@@ -350,7 +353,7 @@ void cancel_mid_drive(const std::shared_ptr<c::PosixIO> &backend) {
 	});
 	run_to_end(context, scheduler,
 			   uncancelled_drive(driver, operation, state, queue, source, timer, completed_at_request));
-	check(completed_at_request < 21 && state->completed == 21);
+	check(completed_at_request < steps && state->completed == steps);
 }
 } // namespace
 int main(int argc, char **argv) {
@@ -397,7 +400,7 @@ int main(int argc, char **argv) {
 				std::rethrow_exception(failure);
 			if (state->error)
 				std::rethrow_exception(state->error);
-			check(done && weak.expired() && state->completed == 23 && !queue->busy());
+			check(done && weak.expired() && state->completed == steps && !queue->busy());
 			check(driver->stats().submitted_to_reaped.size() == 12);
 			context.restart();
 			auto invalid = std::make_shared<Operation>(state, static_cast<c::Kind>(999));
