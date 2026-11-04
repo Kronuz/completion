@@ -4,7 +4,7 @@ project(completion LANGUAGES CXX)
 # Completion-based file I/O: native backends (io_uring on Linux, kqueue on BSD and macOS,
 # a thread pool elsewhere), image publication, and directory scans. Header-only.
 include(FetchContent)
-FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG db490b484f48e8cd8593802c6acf8db18392d3d1)
+FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG 9db73de5c5401061ad5ee4829c8f13416754d8a3)
 # Shared owning PMR allocation contexts, without global allocation overrides.
 FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG 07de45d180f23e2552b9504a6b4d506651594d1e)
 FetchContent_MakeAvailable(metrics allocators)
@@ -24,7 +24,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
 endif()
 option(COMPLETION_ASIO "Build completion::asio, the task::task driver" ${completion_top_level})
 if(COMPLETION_ASIO)
-  FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 6558c2e9c533ebb0fa1177f22edd4fff528f6efa)
+  FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG bdafa5f1ca96a2d34b1c5eb0bbb04e4b3ddb88c0)
   FetchContent_MakeAvailable(task)
   add_library(completion_asio INTERFACE)
   target_link_libraries(completion_asio INTERFACE completion::completion task::asio)
