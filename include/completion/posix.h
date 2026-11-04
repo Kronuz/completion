@@ -535,19 +535,16 @@ public:
 	}
 	std::unique_ptr<DirectoryCursor> make_closed_cursor() override { return control<ReusableCursor>(*this); }
 	void open_existing_into(std::string_view name, File& destination) override {
-		auto &target = file_destination(destination);
-		target.install(open_file(name, false));
+		file_destination(destination).install(open_file(name, false));
+	}
+	void open_existing_read_only_into(std::string_view name, File& destination) override {
+		file_destination(destination).install(open_file(name, false, true));
 	}
 	bool open_reclaim_candidate_into(std::string_view name, File& destination) override {
-		auto &target = file_destination(destination);
-		detail::PosixName component(name); struct stat status{};
-		if (::fstatat(directory_, component.c_str(), &status, AT_SYMLINK_NOFOLLOW)) {
-			if (errno == ENOENT) { return false; } detail::system_failure("inspect reclamation candidate");
-		}
-		if (!S_ISREG(status.st_mode) || status.st_uid != ::geteuid() || status.st_nlink != 1 || (status.st_mode & 0022) ||
-			(status.st_mode & 0600) != 0600 || status.st_dev != device_) { return false; }
-		target.install(open_file(name, false));
-		return true;
+		return reclaim_into(name, destination, false);
+	}
+	bool open_reclaim_candidate_read_only_into(std::string_view name, File& destination) override {
+		return reclaim_into(name, destination, true);
 	}
 	void scan_directory_into(DirectoryCursor& destination) override {
 		auto &target = cursor_destination(destination);
@@ -579,15 +576,8 @@ public:
 		cursor->install(directory);
 		return cursor;
 	}
-	std::unique_ptr<File> open_reclaim_candidate(std::string_view name) override {
-		detail::PosixName component(name); struct stat status{};
-		if (::fstatat(directory_, component.c_str(), &status, AT_SYMLINK_NOFOLLOW)) {
-			if (errno == ENOENT) { return nullptr; } detail::system_failure("inspect reclamation candidate");
-		}
-		if (!S_ISREG(status.st_mode) || status.st_uid != ::geteuid() || status.st_nlink != 1 || (status.st_mode & 0022) ||
-			(status.st_mode & 0600) != 0600 || status.st_dev != device_) { return nullptr; }
-		return file(name, false);
-	}
+	std::unique_ptr<File> open_reclaim_candidate(std::string_view name) override { return reclaim(name, false); }
+	std::unique_ptr<File> open_reclaim_candidate_read_only(std::string_view name) override { return reclaim(name, true); }
 	std::optional<EntryFootprint> entry_footprint(std::string_view name) override {
 		auto inspection = inspect_entry(name);
 		return inspection ? std::optional<EntryFootprint>(inspection->footprint) : std::nullopt;
@@ -645,6 +635,24 @@ public:
 	}
 
 private:
+	// Whether `name` is a regular file this process owns, alone on its link and on the directory's device.
+	bool reclaimable(std::string_view name) {
+		detail::PosixName component(name); struct stat status{};
+		if (::fstatat(directory_, component.c_str(), &status, AT_SYMLINK_NOFOLLOW)) {
+			if (errno == ENOENT) { return false; } detail::system_failure("inspect reclamation candidate");
+		}
+		return S_ISREG(status.st_mode) && status.st_uid == ::geteuid() && status.st_nlink == 1 && !(status.st_mode & 0022) &&
+			(status.st_mode & 0600) == 0600 && status.st_dev == device_;
+	}
+	bool reclaim_into(std::string_view name, File& destination, bool read_only) {
+		auto &target = file_destination(destination);
+		if (!reclaimable(name)) { return false; }
+		target.install(open_file(name, false, read_only));
+		return true;
+	}
+	std::unique_ptr<File> reclaim(std::string_view name, bool read_only) {
+		return reclaimable(name) ? file(name, false, read_only) : nullptr;
+	}
 #ifdef __APPLE__
 	void sync_staged(std::span<File* const> files, detail::SyncMode mode) {
 		std::vector<int> fds;

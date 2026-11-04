@@ -269,6 +269,50 @@ void invalid_group(const std::filesystem::path &base) {
 	check(refused && calls.empty(), "a null file in the group is refused before any sync");
 }
 
+// Every open primitive has a read-only mode: the descriptor reads and syncs, and refuses writes.
+void read_only_opens(const std::filesystem::path &base) {
+	Fixture f(base / "read-only-opens");
+	auto writes_refused = [](c::File &file) {
+		try { file.write_at(0, "x"); } catch (const std::system_error &) { return true; }
+		return false;
+	};
+	auto refuses_and_reads = [&](c::File &file, const char *what) {
+		char buffer[8]{};
+		check(writes_refused(file), what);
+		check(file.read_at(0, buffer) == 5, what);
+	};
+	for (bool read_only : {false, true}) {
+		auto open = [&](c::Kind kind, c::File *into) {
+			c::Request request;
+			request.token.operation = 1;
+			request.kind = kind;
+			request.source = "a";
+			request.read_only = read_only;
+			if (into) { request.file = std::shared_ptr<c::File>(std::shared_ptr<c::File>{}, into); }
+			OnePrimitive operation(*f.io, request);
+			c::drive_synchronously(operation);
+			if (operation.result_.error) { std::rethrow_exception(operation.result_.error); }
+			return std::move(operation.result_);
+		};
+		for (auto kind : {c::Kind::Open, c::Kind::OpenCandidate}) {
+			auto result = open(kind, nullptr);
+			check(result.file, "the open returns a file");
+			if (read_only) {
+				refuses_and_reads(*result.file, "a read-only Open or OpenCandidate refuses writes");
+				check(result.file->try_lease(c::LeaseMode::Exclusive), "a read-only descriptor takes a lease");
+			}
+			else { check(result.file->write_at(0, "b") == 1, "a read-write open writes"); }
+		}
+		for (auto kind : {c::Kind::OpenInto, c::Kind::OpenCandidateInto}) {
+			auto closed = f.io->make_closed_file();
+			auto result = open(kind, closed.get());
+			if (kind == c::Kind::OpenCandidateInto) { check(result.count == 1, "the candidate opens"); }
+			if (read_only) { refuses_and_reads(*closed, "a read-only OpenInto or OpenCandidateInto refuses writes"); }
+			else { check(closed->write_at(0, "b") == 1, "a read-write open writes"); }
+		}
+	}
+}
+
 // The queue retains the operation, and so the group it names, until the original completes.
 void retention(const std::filesystem::path &base) {
 	Fixture f(base / "retention");
@@ -319,6 +363,7 @@ int main(int argc, char **argv) {
 	sequences(base);
 	read_only_descriptor(base);
 	invalid_group(base);
+	read_only_opens(base);
 	retention(base);
 	std::cout << "sync_primitives: ok\n";
 	return 0;
