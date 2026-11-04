@@ -89,7 +89,10 @@ class PreparedImage {
 	friend class ImagePublication;
 };
 
-enum class PreparationFilePolicy { Retain, CloseAfterSeal };
+// Retain: the legacy sequence, the file kept open in the prepared image. CloseAfterSeal: create, write,
+// Sync, DirectorySync, then an explicit close. Stage: create and write only; the file stays open,
+// unsynced, for the caller to sync in a group (SyncFiles) and close.
+enum class PreparationFilePolicy { Retain, CloseAfterSeal, Stage };
 
 class ImagePreparation final : public Operation {
   public:
@@ -136,7 +139,16 @@ class ImagePreparation final : public Operation {
 					 Token token, std::string_view name, std::shared_ptr<const void> owner,
 					 std::string_view bytes, std::size_t maximum, std::unique_ptr<File> closed_file)
 		: ImagePreparation(std::move(context), std::move(io), std::move(lease), token, name, std::move(owner),
-						   bytes, maximum, PreparationFilePolicy::CloseAfterSeal) {
+						   bytes, maximum, std::move(closed_file), PreparationFilePolicy::CloseAfterSeal) {}
+	// As above with an explicit policy: CloseAfterSeal or Stage.
+	ImagePreparation(AllocationContext context, std::shared_ptr<IO> io, std::shared_ptr<void> lease,
+					 Token token, std::string_view name, std::shared_ptr<const void> owner,
+					 std::string_view bytes, std::size_t maximum, std::unique_ptr<File> closed_file,
+					 PreparationFilePolicy policy)
+		: ImagePreparation(std::move(context), std::move(io), std::move(lease), token, name, std::move(owner),
+						   bytes, maximum, policy) {
+		if (policy == PreparationFilePolicy::Retain)
+			throw std::invalid_argument("preallocated preparation requires explicit file close");
 		if (!closed_file || !state_->io->managed_capabilities().reusable_create)
 			throw std::invalid_argument("preallocated preparation requires reusable creation");
 		state_->file = std::move(closed_file);
@@ -152,9 +164,10 @@ class ImagePreparation final : public Operation {
 
   private:
 	void configure_policy(PreparationFilePolicy policy) {
-		if (policy != PreparationFilePolicy::Retain && policy != PreparationFilePolicy::CloseAfterSeal)
+		if (policy != PreparationFilePolicy::Retain && policy != PreparationFilePolicy::CloseAfterSeal &&
+			policy != PreparationFilePolicy::Stage)
 			throw std::invalid_argument("unsupported preparation file policy");
-		if (policy == PreparationFilePolicy::CloseAfterSeal) {
+		if (policy != PreparationFilePolicy::Retain) {
 			if (!state_->io->managed_capabilities().file_close)
 				throw std::invalid_argument("managed preparation requires explicit file close");
 			const auto maximum_step = std::numeric_limits<std::uint64_t>::max();
@@ -202,7 +215,7 @@ class ImagePreparation final : public Operation {
 		in_flight_ = false;
 		if (result.error && !original_error_)
 			original_error_ = result.error;
-		const bool managed = policy_ == PreparationFilePolicy::CloseAfterSeal;
+		const bool managed = policy_ != PreparationFilePolicy::Retain;
 		// An authentic returned handle belongs to this original, even on error.
 		if (managed && phase_ == 0 && !preallocated_ && result.file)
 			state_->file = std::move(result.file);
@@ -244,6 +257,12 @@ class ImagePreparation final : public Operation {
 					terminal();
 				return true;
 			}
+			if (policy_ == PreparationFilePolicy::Stage && phase_ == 2) {
+				// Written, not synced: the file stays open for the caller's group sync and close.
+				staged_ = true;
+				terminal();
+				return true;
+			}
 			if (token_.step == std::numeric_limits<std::uint64_t>::max())
 				throw std::overflow_error("image token exhausted");
 			++token_.step;
@@ -267,7 +286,7 @@ class ImagePreparation final : public Operation {
 	// Only the opt-in managed policy can stop work and drain native cleanup.
 	// The host continues driving this operation through authentic settlement.
 	bool cancel() noexcept {
-		if (done_ || policy_ != PreparationFilePolicy::CloseAfterSeal)
+		if (done_ || policy_ == PreparationFilePolicy::Retain)
 			return false;
 		if (!error_) {
 			try {
@@ -290,8 +309,16 @@ class ImagePreparation final : public Operation {
 	bool done() const noexcept override { return done_; }
 	bool in_flight() const noexcept override { return in_flight_; }
 	IO &io() const noexcept override { return *state_->io; }
+	// Stage policy: written and open, not synced. The caller syncs and closes it.
+	bool staged() const noexcept { return staged_ && !error_; }
+	std::shared_ptr<File> staged_file() const {
+		if (!staged())
+			throw std::logic_error("image is not staged");
+		return std::shared_ptr<File>(state_, state_->file.get());
+	}
+	std::string_view name() const { return state_->name; }
 	PreparedImage prepared() const {
-		if (!done_ || error_)
+		if (!done_ || error_ || staged_)
 			throw std::logic_error("image is not prepared");
 		return PreparedImage(state_);
 	}
@@ -325,7 +352,7 @@ class ImagePreparation final : public Operation {
 	PreparationFilePolicy policy_ = PreparationFilePolicy::Retain;
 	std::size_t offset_ = 0;
 	unsigned phase_ = 0;
-	bool done_ = false, in_flight_ = false, preallocated_ = false, preallocated_open_ = false;
+	bool done_ = false, in_flight_ = false, preallocated_ = false, preallocated_open_ = false, staged_ = false;
 };
 
 // Publish a prepared descriptor, never an application image itself. Its opaque

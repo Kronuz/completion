@@ -3,13 +3,14 @@
 # SPDX-License-Identifier: MIT
 """Mutation check of the owner lock and the SyncFiles and OrderFiles primitives.
 
-Applies each of 14 small breaks to the owner-lock code (include/completion/posix.h and io.h)
+Applies each of 24 small breaks to the owner-lock, sync and staging code (include/completion/posix.h, io.h, image.h)
 in a scratch copy of the repository, rebuilds the CTest suite, runs it, and requires the
 outcome to be the one expected: the suite fails (the mutant is killed) or, for the mutants
-whose break nothing can observe, passes (it survives). The 14 are the ones the CL-2 review
+whose break nothing can observe, passes (it survives). m1 to m14 are the ones the CL-2 review
 (docs/reviews/cl-2-code.md, finding CL2-5) listed; s1 to s8 break the sync primitives and the read-only opens (the device
-flush, the ordering barrier, the directory sync, a file's fsync, which primitive runs, the read-only flag); each is an
-exact-anchor replacement that must match exactly once.
+flush, the ordering barrier, the directory sync, a file's fsync, which primitive runs, the read-only flag); t1 and t2 break the
+Stage policy of image preparation (the stop before the sync, the close after a failure). Each is an exact-anchor replacement
+that must match exactly once.
 
   python3 tools/mutants.py                run all, in a copy under the temp directory
   python3 tools/mutants.py --only m1,m6   run some
@@ -35,6 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 POSIX = "include/completion/posix.h"
 IO = "include/completion/io.h"
 OPERATION = "include/completion/operation.h"
+IMAGE = "include/completion/image.h"
 
 
 class Mutant:
@@ -162,6 +164,14 @@ MUTANTS = [
     Mutant("s8", "read-only open uses O_RDWR", POSIX,
            'int flags = (read_only ? O_RDONLY : O_RDWR) |', 'int flags = O_RDWR |',
            why="every read-only open accepts writes"),
+    Mutant("t1", "a staged image is synced and sealed like any other", IMAGE,
+           '\t\t\tif (policy_ == PreparationFilePolicy::Stage && phase_ == 2) {',
+           '\t\t\tif (false && policy_ == PreparationFilePolicy::Stage && phase_ == 2) {',
+           why="image_close_test records the staged image's requests: a Sync, a DirectorySync and a close appear"),
+    Mutant("t2", "a staged image does not close its file after a failure", IMAGE,
+           '\t\tconst bool managed = policy_ != PreparationFilePolicy::Retain;',
+           '\t\tconst bool managed = policy_ == PreparationFilePolicy::CloseAfterSeal;',
+           why="image_close_test counts the closes after an injected write failure"),
 ]
 
 

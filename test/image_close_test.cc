@@ -29,9 +29,9 @@
 namespace c = kronuz::io::completion;
 namespace j = kronuz::journal;
 namespace {
-void check(bool value) {
+void check(bool value, int line = __builtin_LINE()) {
 	if (!value)
-		throw std::runtime_error("managed image closure invariant failed");
+		throw std::runtime_error("managed image closure invariant failed at line " + std::to_string(line));
 }
 template <class Action> void rejects(Action action) {
 	bool rejected = false;
@@ -306,11 +306,57 @@ int main(int argc, char **argv) {
 			operation.reset();
 			check(weak.expired() && probe.unclosed == 0);
 		}
+		for (auto body : {empty, bytes}) {
+			// Stage: create and write only. The file stays open and unsynced until the caller syncs
+			// the group and closes it; no Sync, DirectorySync or CloseFile is requested.
+			Probe probe;
+			auto io = std::make_shared<IO>(backend, probe);
+			const auto file_name = name();
+			auto staged = c::make_image_preparation({}, io, std::make_shared<int>(1), c::Token{}, file_name,
+													body, body->size(), c::PreparationFilePolicy::Stage);
+			std::vector<c::Kind> trace;
+			while (!staged->done()) {
+				trace.push_back(staged->request().kind);
+				staged->submitted();
+				check(staged->complete(j::detail::execute_primitive(staged->io(), staged->request())));
+			}
+			check(staged->staged() && !staged->error() && probe.closed == 0 && staged->name() == file_name);
+			check(trace.front() == c::Kind::Create);
+			for (auto kind : trace)
+				check(kind == c::Kind::Create || kind == c::Kind::Write);
+			rejects([&] { staged->prepared(); });
+			auto file = staged->staged_file();
+			check(file->size() == body->size());
+			c::Request group;
+			group.kind = c::Kind::SyncFiles;
+			group.files = std::span<const std::shared_ptr<c::File>>(&file, 1);
+			check(!j::detail::execute_primitive(*io, group).error);
+			c::Request close;
+			close.kind = c::Kind::CloseFile;
+			close.file = file;
+			check(!j::detail::execute_primitive(*io, close).error && probe.closed == 1);
+			staged.reset();
+			close.file.reset();
+			file.reset();
+			check(probe.unclosed == 0 && probe.destroyed == 1);
+		}
+		for (auto kind : {c::Kind::Create, c::Kind::Write}) {
+			// A failure while staging closes the file and leaves nothing to sync.
+			Probe probe;
+			auto io = std::make_shared<IO>(backend, probe);
+			auto staged = c::make_image_preparation({}, io, std::make_shared<int>(1), c::Token{}, name(), bytes,
+													bytes->size(), c::PreparationFilePolicy::Stage);
+			drive(*staged, kind);
+			check(bool(staged->error()) && !staged->staged() && probe.closed == (kind == c::Kind::Create ? 0 : 1));
+			rejects([&] { staged->staged_file(); });
+			staged.reset();
+			check(probe.unclosed == 0);
+		}
 		lock.reset();
 		backend.reset();
 		std::filesystem::remove_all(directory);
-		std::cout << "managed preparation seal/close, error drainage, cancellation, token bounds and legacy "
-					 "retention passed\n";
+		std::cout << "managed preparation seal/close, staging, error drainage, cancellation, token bounds and "
+					 "legacy retention passed\n";
 	} catch (const std::exception &error) {
 		std::cerr << error.what() << '\n';
 		return 1;

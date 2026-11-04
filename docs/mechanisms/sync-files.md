@@ -14,6 +14,10 @@ A caller that publishes many files by name needs every file and the directory's 
 - **Drivers.** Neither native queue has an opcode for a group: both run these kinds on the fallback worker and count them in `fallback_extensions` (`SyncFiles` index 11, `OrderFiles` index 12). The Asio adapter dispatches them like any kind, with the extension metrics arrays sized from the stats arrays.
 - **Seam.** `PosixIO::replace_sync_calls` swaps the system calls the sync paths issue on every platform: macOS `fsync` and `fcntl`; Linux `fsync` and the `sync_file_range` writeback hint; FreeBSD `fsync`.
 
+## Staging a group of new files
+
+A publication that creates N files and wants one group sync for them does not run N image preparations to completion. `ImagePreparation` with `PreparationFilePolicy::Stage` (the closed-file constructor with a policy) creates the file and writes it, then stops: `done()` is true, `staged()` is true, `prepared()` still throws, and the file stays open and unsynced behind `staged_file()`. No `Sync`, `DirectorySync` or `CloseFile` is requested. The caller collects the staged files of a window (descriptor use is the bound, so a window is a few hundred files, not the whole publication), submits one `SyncFiles` with them in `MutationRequest::files`, then one `CloseFile` per file. A failure while staging closes that file as the managed policy does (create, write and cleanup errors keep their usual meaning); the window's other staged files are the caller's to close. Detent's `PublicationOperation` is the first caller (`docs/mechanisms/sync-groups.md` there). Mutants t1 (a staged image is synced like any other) and t2 (a staged image is not closed after a failure) are killed by `image_close_test`.
+
 ## What reaches stable storage when the call returns
 
 | Platform | `SyncFiles` (durable) | `OrderFiles` (ordered) | Calls, in order |

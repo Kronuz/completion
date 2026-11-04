@@ -7,7 +7,7 @@
 // made durable one way, and then a directory barrier is taken; the commit part is timed,
 // the writes are not. Every round runs each variant once, in turn, on fresh files.
 //
-//   completion_sync_probe [DIRECTORY [FILES [ROUNDS]]]     (defaults: $TMPDIR, 9, 15)
+//   completion_sync_probe [DIRECTORY [FILES [ROUNDS [FILE_KB]]]]   (defaults: $TMPDIR, 9, 15, 200)
 //
 // Run it on the device under test (DIRECTORY decides which), otherwise idle. Prints the
 // median, minimum and maximum of each variant in milliseconds.
@@ -22,7 +22,7 @@
 namespace {
 using namespace probe;
 
-constexpr std::uint64_t kFileBytes = 200 * 1024;
+std::uint64_t kFileBytes = 200 * 1024;
 
 struct Variant {
 	std::string name;
@@ -30,6 +30,11 @@ struct Variant {
 	void (*commit)(j::IO&, Batch&, int directory);
 	std::vector<double> milliseconds;
 };
+
+// What a publication did before SyncFiles: every file synced and its directory entry flushed in turn.
+void file_and_directory_each(j::IO& io, Batch& batch, int) {
+	for (auto& file : batch.files) { file->sync(); io.sync_directory(); }
+}
 
 void each_full_sync(j::IO& io, Batch& batch, int) {
 	for (auto& file : batch.files) { file->sync(); }
@@ -90,13 +95,15 @@ int main(int argc, char** argv) {
 		const auto parent = directory_argument(argc, argv, 1);
 		const int files = static_cast<int>(integer_argument(argc, argv, 2, 9));
 		const int rounds = static_cast<int>(integer_argument(argc, argv, 3, 15));
-		if (files < 1 || rounds < 1) { std::cerr << "usage: completion_sync_probe [DIRECTORY [FILES [ROUNDS]]]\n"; return 2; }
+		kFileBytes = integer_argument(argc, argv, 4, 200) * 1024;
+		if (files < 1 || rounds < 1) { std::cerr << "usage: completion_sync_probe [DIRECTORY [FILES [ROUNDS [FILE_KB]]]]\n"; return 2; }
 		ScratchDirectory scratch(parent);
 		j::PosixIO io(scratch.path());
 		const int directory = ::open(scratch.path().c_str(), O_RDONLY | O_DIRECTORY);
 		if (directory < 0) { throw std::runtime_error("open directory"); }
 
 		std::vector<Variant> variants;
+		variants.push_back({"sync and directory flush per file", file_and_directory_each, {}});
 		variants.push_back({"one full sync each (File::sync)", each_full_sync, {}});
 		variants.push_back({"batched (IO::sync_files)", batched, {}});
 		variants.push_back({"concurrent fsync threads", fsync_threads, {}});
