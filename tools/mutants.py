@@ -7,8 +7,8 @@ Applies each of 14 small breaks to the owner-lock code (include/completion/posix
 in a scratch copy of the repository, rebuilds the CTest suite, runs it, and requires the
 outcome to be the one expected: the suite fails (the mutant is killed) or, for the mutants
 whose break nothing can observe, passes (it survives). The 14 are the ones the CL-2 review
-(docs/reviews/cl-2-code.md, finding CL2-5) listed; s1 to s6 break the sync primitives (the device
-flush, the ordering barrier, the directory sync, a file's fsync, which primitive runs); each is an
+(docs/reviews/cl-2-code.md, finding CL2-5) listed; s1 to s8 break the sync primitives and the read-only opens (the device
+flush, the ordering barrier, the directory sync, a file's fsync, which primitive runs, the read-only flag); each is an
 exact-anchor replacement that must match exactly once.
 
   python3 tools/mutants.py                run all, in a copy under the temp directory
@@ -155,6 +155,13 @@ MUTANTS = [
                  '\t\tif (result < 0) { system_failure("durably sync journal file"); }'),
            expect={"Darwin": "survived", "default": "killed"},
            why="Linux and FreeBSD only: files_sync is their per-file fsync loop; macOS stages through files_sync_devices"),
+    Mutant("s7", "Open ignores read_only", OPERATION,
+           '\t\t\tresult.file = request.read_only ? io.open_existing_read_only(request.source) : io.open_existing(request.source);',
+           '\t\t\tresult.file = io.open_existing(request.source);',
+           why="the opened descriptor accepts writes"),
+    Mutant("s8", "read-only open uses O_RDWR", POSIX,
+           'int flags = (read_only ? O_RDONLY : O_RDWR) |', 'int flags = O_RDWR |',
+           why="every read-only open accepts writes"),
 ]
 
 
