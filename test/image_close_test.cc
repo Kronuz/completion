@@ -95,6 +95,10 @@ class IO final : public c::IO {
 	std::unique_ptr<c::File> open_existing(std::string_view name) override {
 		return backend->open_existing(name);
 	}
+	std::unique_ptr<c::File> open_existing_read_only(std::string_view name) override { return backend->open_existing_read_only(name); }
+	void open_existing_read_only_into(std::string_view name, c::File& file) override { backend->open_existing_read_only_into(name, file); }
+	bool open_reclaim_candidate_read_only_into(std::string_view name, c::File& file) override { return backend->open_reclaim_candidate_read_only_into(name, file); }
+	std::unique_ptr<c::File> open_reclaim_candidate_read_only(std::string_view name) override { return backend->open_reclaim_candidate_read_only(name); }
 	std::unique_ptr<c::File> create_exclusive(std::string_view name) override {
 		return std::make_unique<File>(backend->create_exclusive(name), probe);
 	}
