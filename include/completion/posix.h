@@ -32,6 +32,8 @@
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
+#include <functional>
+#include <mutex>
 #include <dirent.h>
 #include <limits>
 #include <stdexcept>
@@ -52,6 +54,9 @@
 #include <unistd.h>
 #include <utility>
 #include <vector>
+#ifdef __APPLE__
+#include <dlfcn.h>
+#endif
 
 namespace kronuz::journal {
 
@@ -150,14 +155,15 @@ struct SyncCalls {
 	FcntlCall fcntl_call = &default_fcntl;
 	int stat(int fd, struct stat* status) const { return ::fstat(fd, status); }
 	int full_sync(int fd) const { return fcntl_call(fd, F_FULLFSYNC); }
-	// F_BARRIERFSYNC; the stronger full flush only where the filesystem lacks the call. Any
-	// other error (EIO, ...) is the barrier's own failure and is returned, never retried.
+	// F_BARRIERFSYNC, 0 when it ordered; where the filesystem lacks the call, the stronger
+	// full flush, 1 when it succeeded. Any other error (EIO, ...) is the barrier's own failure
+	// and is returned, never retried.
 	int barrier(int fd) const {
 		int result;
 		do { result = fcntl_call(fd, F_BARRIERFSYNC); } while (result < 0 && errno == EINTR);
-		if (result >= 0 || !barrier_unsupported(errno)) { return result; }
+		if (result >= 0 || !barrier_unsupported(errno)) { return result < 0 ? result : 0; }
 		do { result = full_sync(fd); } while (result < 0 && errno == EINTR);
-		return result;
+		return result < 0 ? result : 1;
 	}
 #endif
 #ifdef __linux__
@@ -192,9 +198,10 @@ enum class SyncMode { durable, ordered };
 // device once. Ordered mode issues a barrier, not a full flush, on the directory's device;
 // every other device is still flushed in full.
 // `directory_flush` is the descriptor a flush of the directory's device goes through when
-// no file shares it (the owner file when held, else the directory).
-template <class Calls> inline void files_sync_devices(std::span<const int> fds, int directory, int directory_flush, SyncMode mode, Calls& calls) {
-	if (fds.empty() && directory < 0) { return; }
+// no file shares it (the owner file when held, else the directory). True when the directory's
+// device was ordered by a barrier that did not flush (a barrier returning 0).
+template <class Calls> inline bool files_sync_devices(std::span<const int> fds, int directory, int directory_flush, SyncMode mode, Calls& calls) {
+	if (fds.empty() && directory < 0) { return false; }
 	struct DeviceFile { dev_t device; int fd; bool directory; };
 	std::vector<DeviceFile> devices;
 	devices.reserve(fds.size() + 1);
@@ -219,6 +226,7 @@ template <class Calls> inline void files_sync_devices(std::span<const int> fds, 
 		do { result = calls.sync(directory); } while (result < 0 && errno == EINTR);
 		if (result < 0) { system_failure("sync journal directory"); }
 	}
+	bool ordered_only = false;
 	for (std::size_t i = 0; i < devices.size(); ++i) {
 		if (i && devices[i].device == devices[i - 1].device) { continue; }
 		bool holds_directory = false;
@@ -227,14 +235,16 @@ template <class Calls> inline void files_sync_devices(std::span<const int> fds, 
 		if (mode == SyncMode::ordered && holds_directory) {
 			do { result = calls.barrier(devices[i].fd); } while (result < 0 && errno == EINTR);
 			if (result < 0) { system_failure("order journal files"); }
+			ordered_only = result == 0;
 		} else {
 			do { result = calls.full_sync(devices[i].fd); } while (result < 0 && errno == EINTR);
 			if (result < 0) { system_failure("durably sync journal file"); }
 		}
 	}
+	return ordered_only;
 }
 template <class Calls> inline void files_sync_devices(std::span<const int> fds, Calls& calls) {
-	files_sync_devices(fds, -1, -1, SyncMode::durable, calls);
+	(void)files_sync_devices(fds, -1, -1, SyncMode::durable, calls);
 }
 // macOS stages every file before flushing each distinct device; Linux starts writeback
 // on every file before the first fsync waits; elsewhere each file is fsync'd in order.
@@ -290,6 +300,163 @@ inline FilesystemClass classify_filesystem(const struct statfs& status) {
 	return detail::mount_filesystem((status.f_flags & MNT_LOCAL) != 0,
 		std::string_view(name, ::strnlen(name, sizeof status.f_fstypename)));
 }
+#endif
+
+// What lies under a volume, for the barrier warning: Apple guarantees F_BARRIERFSYNC's order
+// only on its SSDs and documents nothing about the call on other storage.
+struct BarrierStorage {
+	bool apple_ssd = false;  // every storage device under the volume is an internal Apple SSD
+	std::string name;        // what was found, e.g. "APPLE SSD AP1024M (PCI-Express, Internal)"
+	bool operator==(const BarrierStorage&) const = default;
+};
+// A volume where an ordering barrier returned success on storage other than an internal Apple
+// SSD: acknowledged commits stay durable through their final flush, but the barrier's order is
+// not guaranteed (docs/mechanisms/barriers.md).
+struct BarrierWarning {
+	std::uint64_t device = 0;  // the volume's st_dev; each is reported once per process
+	std::string volume;        // its mount point
+	std::string source;        // what it is mounted from (/dev/disk4s1, //host/share)
+	BarrierStorage storage;
+};
+
+#ifdef __APPLE__
+namespace detail {
+// IOKit and CoreFoundation, loaded at the first classification so consumers link nothing more.
+// The types are the C ABI's: CFTypeRef, io_object_t (a mach port name), CFTypeID, CFIndex.
+class AppleRegistry {
+public:
+	static const AppleRegistry& get() {
+		static const AppleRegistry registry;
+		return registry;
+	}
+	// Every entry above the BSD device `name` in the service plane that carries "Device
+	// Characteristics": the volume is an Apple SSD when each one is "APPLE SSD ..." and Internal.
+	BarrierStorage storage(const char* name) const {
+		if (!loaded_) { return {false, "unidentified (IOKit unavailable)"}; }
+		auto matching = bsd_name_matching_(0, 0, name);
+		if (!matching) { return {false, std::string("unidentified (no matching for ") + name + ")"}; }
+		const Object media = matching_service_(0, matching);  // consumes `matching`
+		if (!media) { return {false, std::string("unidentified (no registry entry for ") + name + ")"}; }
+		Object parents = 0;
+		if (create_iterator_(media, "IOService", recursive_parents, &parents) != 0) {
+			object_release_(media);
+			return {false, std::string("unidentified (no parents for ") + name + ")"};
+		}
+		const Key device_key(*this, "Device Characteristics"), product_key(*this, "Product Name"),
+			protocol_key(*this, "Protocol Characteristics"), interconnect_key(*this, "Physical Interconnect"),
+			location_key(*this, "Physical Interconnect Location");
+		BarrierStorage result{true, {}};
+		bool found = false;
+		while (const Object entry = iterator_next_(parents)) {
+			if (const Ref device = property(entry, device_key)) {
+				const Ref protocol = property(entry, protocol_key);
+				auto product = text(device, product_key), interconnect = text(protocol, interconnect_key),
+					location = text(protocol, location_key);
+				result.apple_ssd &= product.starts_with("APPLE SSD ") && location == "Internal";
+				if (found) { result.name += " + "; }
+				result.name += (product.empty() ? "unnamed device" : product) + " (" +
+					(interconnect.empty() ? "unknown interconnect" : interconnect) + ", " + (location.empty() ? "unknown location" : location) + ")";
+				found = true;
+				if (protocol) { release_(protocol); }
+				release_(device);
+			}
+			object_release_(entry);
+		}
+		object_release_(parents);
+		object_release_(media);
+		if (!found) { return {false, std::string("unidentified (no storage device under ") + name + ")"}; }
+		return result;
+	}
+	AppleRegistry(const AppleRegistry&) = delete;
+	AppleRegistry& operator=(const AppleRegistry&) = delete;
+private:
+	using Ref = const void*;
+	using Object = unsigned int;
+	static constexpr std::uint32_t utf8 = 0x08000100;          // kCFStringEncodingUTF8
+	static constexpr std::uint32_t recursive_parents = 1 | 2;  // kIORegistryIterateRecursively | kIORegistryIterateParents
+	class Key {
+	public:
+		Key(const AppleRegistry& registry, const char* text) : registry_(registry), ref_(registry.string_(nullptr, text, utf8)) {}
+		~Key() { if (ref_) { registry_.release_(ref_); } }
+		Key(const Key&) = delete;
+		Key& operator=(const Key&) = delete;
+		Ref get() const noexcept { return ref_; }
+	private:
+		const AppleRegistry& registry_;
+		Ref ref_;
+	};
+	AppleRegistry() {
+		void* iokit = ::dlopen("/System/Library/Frameworks/IOKit.framework/IOKit", RTLD_LAZY | RTLD_LOCAL);
+		void* cf = ::dlopen("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation", RTLD_LAZY | RTLD_LOCAL);
+		if (!iokit || !cf) { return; }
+		loaded_ = bind(iokit, "IOBSDNameMatching", bsd_name_matching_) & bind(iokit, "IOServiceGetMatchingService", matching_service_) &
+			bind(iokit, "IORegistryEntryCreateIterator", create_iterator_) & bind(iokit, "IOIteratorNext", iterator_next_) &
+			bind(iokit, "IORegistryEntryCreateCFProperty", create_property_) & bind(iokit, "IOObjectRelease", object_release_) &
+			bind(cf, "CFStringCreateWithCString", string_) & bind(cf, "CFRelease", release_) & bind(cf, "CFGetTypeID", type_of_) &
+			bind(cf, "CFStringGetTypeID", string_type_) & bind(cf, "CFDictionaryGetTypeID", dictionary_type_) &
+			bind(cf, "CFDictionaryGetValue", dictionary_value_) & bind(cf, "CFStringGetCString", string_bytes_);
+		if (loaded_) {
+			// Every key the walk reads must exist, or nothing is classified.
+			const Key probe(*this, "Device Characteristics");
+			loaded_ = probe.get() != nullptr;
+		}
+	}
+	template <class F> static bool bind(void* library, const char* symbol, F& function) {
+		function = reinterpret_cast<F>(::dlsym(library, symbol));
+		return function != nullptr;
+	}
+	Ref property(Object entry, const Key& key) const {
+		const Ref value = create_property_(entry, key.get(), nullptr, 0);
+		if (value && type_of_(value) != dictionary_type_()) { release_(value); return nullptr; }
+		return value;
+	}
+	// A dictionary's string value, without the padding drives report; empty when absent.
+	std::string text(Ref dictionary, const Key& key) const {
+		if (!dictionary) { return {}; }
+		const Ref value = dictionary_value_(dictionary, key.get());
+		char bytes[256] = {};
+		if (!value || type_of_(value) != string_type_() || !string_bytes_(value, bytes, sizeof bytes, utf8)) { return {}; }
+		std::string_view view(bytes);
+		const auto first = view.find_first_not_of(' ');
+		if (first == view.npos) { return {}; }
+		view = view.substr(first, view.find_last_not_of(' ') - first + 1);
+		return std::string(view);
+	}
+	bool loaded_ = false;
+	Ref (*bsd_name_matching_)(Object, std::uint32_t, const char*) = nullptr;
+	Object (*matching_service_)(Object, Ref) = nullptr;
+	int (*create_iterator_)(Object, const char*, std::uint32_t, Object*) = nullptr;
+	Object (*iterator_next_)(Object) = nullptr;
+	Ref (*create_property_)(Object, Ref, Ref, std::uint32_t) = nullptr;
+	int (*object_release_)(Object) = nullptr;
+	Ref (*string_)(Ref, const char*, std::uint32_t) = nullptr;
+	void (*release_)(Ref) = nullptr;
+	unsigned long (*type_of_)(Ref) = nullptr;
+	unsigned long (*string_type_)() = nullptr;
+	unsigned long (*dictionary_type_)() = nullptr;
+	Ref (*dictionary_value_)(Ref, Ref) = nullptr;
+	unsigned char (*string_bytes_)(Ref, char*, long, std::uint32_t) = nullptr;
+};
+// The storage under a mounted volume: IOKit's devices for a /dev/disk mount, else unidentified.
+inline BarrierStorage barrier_storage(const struct statfs& volume) {
+	const std::string_view source(volume.f_mntfromname, ::strnlen(volume.f_mntfromname, sizeof volume.f_mntfromname));
+	constexpr std::string_view disk = "/dev/";
+	if (!source.starts_with(disk)) {
+		const std::string_view type(volume.f_fstypename, ::strnlen(volume.f_fstypename, sizeof volume.f_fstypename));
+		return {false, "unidentified (" + std::string(type) + " volume, not a disk)"};
+	}
+	return AppleRegistry::get().storage(std::string(source.substr(disk.size())).c_str());
+}
+// The volumes this process has classified for the barrier warning, each once.
+struct BarrierVolumes {
+	std::mutex mutex;
+	std::vector<std::uint64_t> devices;
+};
+inline BarrierVolumes& barrier_volumes() {
+	static BarrierVolumes volumes;
+	return volumes;
+}
+} // namespace detail
 #endif
 
 namespace detail {
@@ -432,6 +599,11 @@ struct PosixIOOptions {
 	// F_BARRIERFSYNC, whose ordering Apple guarantees only on Apple SSDs. Other platforms
 	// already flush in full.
 	bool full_flush_ordering = false;
+	// macOS: called once per volume per process, after the first barrier that ordered without
+	// flushing on storage other than an internal Apple SSD, on the thread of that ordering call.
+	// An exception fails the call after its barrier, and the volume warns again. Never called
+	// elsewhere or with full_flush_ordering.
+	std::function<void(const BarrierWarning&)> barrier_warning;
 };
 
 class PosixIO final : public IO {
@@ -441,10 +613,14 @@ public:
 	// symlink, a foreign owner, and a group/other-writable mode are rejected here;
 	// `options` admits them (see directory_trust to warn). Entries stay no-follow.
 	explicit PosixIO(const std::filesystem::path& directory, unsigned artifact_mode = 0600, PosixIOOptions options = {})
-		: PosixIO(kronuz::io::completion::AllocationContext{}, directory, artifact_mode, options) {}
+		: PosixIO(kronuz::io::completion::AllocationContext{}, directory, artifact_mode, std::move(options)) {}
 	PosixIO(kronuz::io::completion::AllocationContext context, const std::filesystem::path& directory,
 		unsigned artifact_mode = 0600, PosixIOOptions options = {})
-		: context_(std::move(context)), artifact_mode_(artifact_mode), full_flush_ordering_(options.full_flush_ordering) {
+		: context_(std::move(context)),
+#ifdef __APPLE__
+		  barrier_warning_(std::move(options.barrier_warning)),
+#endif
+		  artifact_mode_(artifact_mode), full_flush_ordering_(options.full_flush_ordering) {
 		if (artifact_mode != 0600 && artifact_mode != 0640 && artifact_mode != 0644) {
 			throw std::invalid_argument("unsupported artifact permissions");
 		}
@@ -527,6 +703,11 @@ public:
 	using StatfsCall = int (*)(int fd, struct statfs* result);
 	// A test seam: the filesystem answer directory_filesystem classifies; null is fstatfs.
 	void replace_statfs(StatfsCall call) noexcept { statfs_ = call; }
+#endif
+#ifdef __APPLE__
+	using BarrierStorageCall = BarrierStorage (*)(const struct statfs& volume);
+	// A test seam: what lies under the directory's volume for the barrier warning; null is IOKit's.
+	void replace_barrier_storage(BarrierStorageCall call) noexcept { barrier_storage_ = call ? call : &detail::barrier_storage; }
 #endif
 	std::unique_ptr<File> make_closed_file() override { return control<ReusableFile>(*this); }
 	void create_exclusive_into(std::string_view name, File& destination) override {
@@ -616,7 +797,8 @@ public:
 	// With PosixIOOptions::full_flush_ordering the barrier is a full flush.
 	void order_files_and_directory(std::span<File* const> files) override {
 #ifdef __APPLE__
-		sync_staged(files, full_flush_ordering_ ? detail::SyncMode::durable : detail::SyncMode::ordered);
+		const bool ordered_only = sync_staged(files, full_flush_ordering_ ? detail::SyncMode::durable : detail::SyncMode::ordered);
+		if (ordered_only && barrier_warning_ && !barrier_noted_.load(std::memory_order_relaxed)) { note_barrier_volume(); }
 #else
 		sync_files_and_directory(files);
 #endif
@@ -654,7 +836,8 @@ private:
 		return reclaimable(name) ? file(name, false, read_only) : nullptr;
 	}
 #ifdef __APPLE__
-	void sync_staged(std::span<File* const> files, detail::SyncMode mode) {
+	// True when the directory's device was ordered by a barrier that did not flush.
+	bool sync_staged(std::span<File* const> files, detail::SyncMode mode) {
 		std::vector<int> fds;
 		fds.reserve(files.size());
 		for (auto* file : files) {
@@ -664,9 +847,43 @@ private:
 				file->sync();
 			}
 		}
-		if (fds.empty() && mode == detail::SyncMode::durable) { sync_directory(); return; }
+		if (fds.empty() && mode == detail::SyncMode::durable) { sync_directory(); return false; }
 		const int owner = owner_fd_.load();
-		detail::files_sync_devices(fds, directory_, owner >= 0 ? owner : directory_, mode, sync_calls_);
+		return detail::files_sync_devices(fds, directory_, owner >= 0 ? owner : directory_, mode, sync_calls_);
+	}
+	// The first barrier this backend ordered without flushing: classifies the volume once per
+	// process and warns when no internal Apple SSD is under it.
+	void note_barrier_volume() {
+		if (barrier_noted_.exchange(true, std::memory_order_relaxed)) { return; }
+		auto& volumes = detail::barrier_volumes();
+		const auto device = static_cast<std::uint64_t>(device_);
+		{
+			std::lock_guard lock(volumes.mutex);
+			if (std::ranges::find(volumes.devices, device) != volumes.devices.end()) { return; }
+			volumes.devices.push_back(device);
+		}
+		try {
+			BarrierWarning warning{device, {}, {}, {}};
+			struct statfs status{};
+			int result;
+			do { result = statfs_ ? statfs_(directory_, &status) : ::fstatfs(directory_, &status); }
+			while (result < 0 && errno == EINTR);
+			if (result < 0) {
+				warning.storage = {false, "unidentified (" + std::error_code(errno, std::generic_category()).message() + ")"};
+			} else {
+				warning.volume.assign(status.f_mntonname, ::strnlen(status.f_mntonname, sizeof status.f_mntonname));
+				warning.source.assign(status.f_mntfromname, ::strnlen(status.f_mntfromname, sizeof status.f_mntfromname));
+				warning.storage = barrier_storage_(status);
+			}
+			if (!warning.storage.apple_ssd) { barrier_warning_(warning); }
+		} catch (...) {
+			{
+				std::lock_guard lock(volumes.mutex);
+				std::erase(volumes.devices, device);
+			}
+			barrier_noted_.store(false, std::memory_order_relaxed);
+			throw;
+		}
 	}
 #endif
 	class ReusableFile : public detail::PosixFile {
@@ -797,15 +1014,20 @@ private:
 #ifdef KRONUZ_COMPLETION_STATFS
 	StatfsCall statfs_ = nullptr;
 #endif
+#ifdef __APPLE__
+	std::function<void(const BarrierWarning&)> barrier_warning_;
+	BarrierStorageCall barrier_storage_ = &detail::barrier_storage;
+	std::atomic<bool> barrier_noted_{false};
+#endif
 	dev_t device_{};
 	unsigned artifact_mode_ = 0600;
 	bool full_flush_ordering_ = false;
 };
 
 inline std::shared_ptr<PosixIO> make_posix_io(kronuz::io::completion::AllocationContext context,
-	const std::filesystem::path& directory, unsigned artifact_mode = 0600) {
+	const std::filesystem::path& directory, unsigned artifact_mode = 0600, PosixIOOptions options = {}) {
 	return std::allocate_shared<PosixIO>(kronuz::io::completion::OwnedAllocator<PosixIO>(context),
-		context, directory, artifact_mode);
+		context, directory, artifact_mode, std::move(options));
 }
 
 } // namespace kronuz::journal

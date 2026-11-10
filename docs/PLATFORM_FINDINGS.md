@@ -103,7 +103,18 @@ and virtual disks, what APFS does with the call is undocumented, and if it degra
 can leave a visible manifest whose files are not on the media (strata then refuses to open the index rather than
 serving wrong data; acknowledged commits stay durable through the final `F_FULLFSYNC`). Hosts that cannot vouch for
 their storage set `PosixIOOptions::full_flush_ordering`: `order_files_and_directory` then issues `F_FULLFSYNC`
-where it would issue the barrier. The default stays the barrier.
+where it would issue the barrier. The default stays the barrier. `PosixIOOptions::barrier_warning` is called once
+per volume per process after the first barrier that ordered without flushing on storage IOKit does not identify as
+an internal Apple SSD (`docs/mechanisms/barriers.md`).
+
+**Where the barrier warns.** On macOS x86_64 (Darwin 24.6, a T2 Mac), IOKit reports the internal drive as
+`APPLE SSD AP1024M`, "Physical Interconnect" `PCI-Express`, "Physical Interconnect Location" `Internal`, on the
+`IONVMeBlockStorageDevice` above the APFS volume's media; a disk image's device reports `Disk Image`, `Virtual
+Interface`, `File`. `F_BARRIERFSYNC` returns success on disk images formatted APFS, HFS+, exFAT and FAT32: none
+returns `ENOTTY`, so the full-flush fallback never runs there and the barrier warns. The system and data volumes of
+an APFS volume group report the same `st_dev` (`/` and `/System/Volumes/Data` both read 16777220 here), so they
+warn as one volume. `test/sync_calls_test.cc` with `COMPLETION_EXPECT_STORAGE=apple` (the internal SSD) or `other`
+(a disk image) checks the classification and the real warning on such a volume.
 
 **Barrier errors.** The barrier falls back to `F_FULLFSYNC` only when the filesystem lacks the call (`ENOTSUP`,
 `EOPNOTSUPP`, `ENOTTY`; an unrecognised `fcntl` command returns `ENOTTY` on macOS, and FAT and exFAT volumes accept

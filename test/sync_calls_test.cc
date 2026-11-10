@@ -21,11 +21,13 @@
  */
 
 // PosixIO's real sync call sequence on a real directory, recorded through replace_sync_calls:
-// which files and the directory are fsync'd, what the one ordering point issues, and which
-// barrier errors fail the commit.
+// which files and the directory are fsync'd, what the one ordering point issues, which barrier
+// errors fail the commit, and when the barrier warning fires (once per volume, macOS only).
 #include "completion/posix.h"
 #include <algorithm>
 #include <cstdlib>
+#include <stdexcept>
+#include <string_view>
 #include <functional>
 #include <system_error>
 #include <filesystem>
@@ -49,6 +51,9 @@ int barrier_error = 0;   // fails the next barriers with this errno
 int barrier_failures = 0;
 int full_error = 0;      // fails the next full flush with this errno
 std::string full_target; // the name behind the descriptor of the last full flush
+std::vector<j::BarrierWarning> warnings;  // every warning a callback returned from
+int warning_calls = 0;   // every callback invocation, thrown or returned
+int warning_throws = 0;  // the next callbacks throw
 
 std::string name_of(int fd) {
 	char path[1024] = {};
@@ -191,6 +196,155 @@ void full_flush_option(const std::filesystem::path& base) {
 		"full_flush_ordering replaces the barrier with one full flush");
 	expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "full_flush_ordering orders a directory alone in full");
 }
+
+j::PosixIOOptions warned(j::PosixIOOptions options = {}) {
+	options.barrier_warning = [](const j::BarrierWarning& warning) {
+		++warning_calls;
+		if (warning_throws > 0) { --warning_throws; throw std::runtime_error("host callback failed"); }
+		warnings.push_back(warning);
+	};
+	return options;
+}
+j::BarrierStorage other_storage(const struct statfs&) { return {false, "test storage"}; }
+j::BarrierStorage apple_storage(const struct statfs&) { return {true, "APPLE SSD test (PCI-Express, Internal)"}; }
+std::string mount_point(const struct statfs& status) { return std::string(status.f_mntonname, ::strnlen(status.f_mntonname, sizeof status.f_mntonname)); }
+std::string mount_source(const struct statfs& status) { return std::string(status.f_mntfromname, ::strnlen(status.f_mntfromname, sizeof status.f_mntfromname)); }
+std::uint64_t device_of(const std::filesystem::path& path) {
+	struct stat status{};
+	check(::stat(path.c_str(), &status) == 0, "stat a volume");
+	return static_cast<std::uint64_t>(status.st_dev);
+}
+int quiet_fsync(int) { calls.push_back("fsync"); return 0; }
+int quiet_fcntl(int, int command) { calls.push_back(command == F_BARRIERFSYNC ? "barrier" : "full"); return 0; }
+// A PosixIO on another volume's root, whose sync calls are recorded and never reach it.
+std::unique_ptr<j::PosixIO> volume_io(const std::filesystem::path& root, j::PosixIO::BarrierStorageCall storage) {
+	auto io = std::make_unique<j::PosixIO>(root, 0600, warned({.allow_shared_directory = true}));
+	io->replace_sync_calls(&quiet_fsync, &quiet_fcntl);
+	io->replace_barrier_storage(storage);
+	return io;
+}
+// Two mounted local volumes other than `base`'s, each with its own st_dev, whose roots PosixIO opens.
+std::vector<std::filesystem::path> other_volumes(const std::filesystem::path& base) {
+	struct statfs* mounts = nullptr;
+	const int count = ::getmntinfo(&mounts, MNT_NOWAIT);
+	std::vector<std::uint64_t> seen{device_of(base)};
+	std::vector<std::filesystem::path> found;
+	for (int i = 0; i < count && found.size() < 2; ++i) {
+		const std::string_view type(mounts[i].f_fstypename);
+		if (!(mounts[i].f_flags & MNT_LOCAL) || type == "autofs") { continue; }
+		const std::filesystem::path root = mount_point(mounts[i]);
+		struct stat status{};
+		if (::stat(root.c_str(), &status) || std::ranges::find(seen, static_cast<std::uint64_t>(status.st_dev)) != seen.end()) { continue; }
+		try { j::PosixIO probe(root, 0600, {.allow_shared_directory = true}); } catch (const std::exception&) { continue; }
+		seen.push_back(static_cast<std::uint64_t>(status.st_dev));
+		found.push_back(root);
+	}
+	check(found.size() == 2, "two other local volumes are mounted (devfs and an APFS system volume)");
+	return found;
+}
+
+// The warning fires after a barrier that ordered without flushing, once per volume per process,
+// only where the storage is not an internal Apple SSD. Runs before any other test on base's volume
+// classifies it.
+void barrier_warning(const std::filesystem::path& base) {
+	const Log stage{"fsync:a", "fsync:b", "fsync:c"};
+	{
+		Fixture f(base / "warn-full-flush", warned({.full_flush_ordering = true}));
+		f.io->replace_barrier_storage(&other_storage);
+		expect(run([&] { f.io->order_files_and_directory(f.all); }), cat(stage, {"fsync:" + f.dir(), "full"}), "full_flush_ordering flushes");
+		expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "full_flush_ordering flushes a directory alone");
+		check(warning_calls == 0, "full_flush_ordering never warns: no barrier ordered without flushing");
+	}
+	Fixture f(base / "warn", warned());
+	f.io->replace_barrier_storage(&other_storage);
+	const Log ordered = cat(stage, {"fsync:" + f.dir(), "barrier"});
+	expect(run([&] { f.io->sync_files_and_directory(f.all); }), cat(stage, {"fsync:" + f.dir(), "full"}), "a durable batch flushes");
+	expect(run([&] { f.io->sync_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "an empty durable batch flushes");
+	expect(run([&] { f.io->sync_files(f.all); }), cat(stage, {"full"}), "sync_files flushes");
+	expect(run([&] { f.io->sync_directory(); }), {"fsync:" + f.dir(), "full"}, "sync_directory flushes");
+	check(warning_calls == 0, "durable calls never warn");
+	for (int error : {ENOTSUP, EOPNOTSUPP, ENOTTY}) {
+		barrier_error = error; barrier_failures = 1;
+		expect(run([&] { f.io->order_files_and_directory(f.all); }), cat(ordered, {"full"}), "an unsupported barrier falls back to a full flush");
+		check(warning_calls == 0, "a barrier that fell back to a full flush does not warn");
+	}
+	barrier_error = EIO; barrier_failures = 1;
+	bool failed = false;
+	try { f.io->order_files_and_directory(f.all); } catch (const std::system_error&) { failed = true; }
+	check(failed && warning_calls == 0, "a failed barrier fails the call and does not warn");
+	barrier_error = 0; barrier_failures = 0;
+
+	// A callback that throws fails the call after its barrier; the volume then warns again.
+	warning_throws = 1;
+	bool threw = false;
+	calls.clear();
+	try { f.io->order_files_and_directory(f.all); } catch (const std::runtime_error& e) { threw = std::string_view(e.what()) == "host callback failed"; }
+	check(threw && warning_calls == 1 && warnings.empty(), "a throwing callback fails the ordering call");
+	check(calls == ordered, "the throwing callback ran after the barrier");
+	expect(run([&] { f.io->order_files_and_directory(f.all); }), ordered, "the warning adds no sync call");
+	check(warning_calls == 2 && warnings.size() == 1, "the volume warns again after a callback threw");
+	struct statfs volume{};
+	check(::statfs(base.c_str(), &volume) == 0, "statfs base");
+	const auto& warning = warnings.front();
+	check(warning.device == device_of(f.directory), "the warning names the volume's st_dev");
+	check(warning.volume == mount_point(volume) && warning.source == mount_source(volume), "the warning names the mount point and its source");
+	check(warning.storage == j::BarrierStorage{false, "test storage"}, "the warning carries the storage found");
+
+	// Once per volume: the same backend, a directory-only ordering point, and another backend on it.
+	expect(run([&] { f.io->order_files_and_directory(f.all); }), ordered, "a second ordering point");
+	expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "barrier"}, "a directory-only ordering point");
+	Fixture g(base / "warn-again", warned());
+	g.io->replace_barrier_storage(&other_storage);
+	expect(run([&] { g.io->order_files_and_directory(g.all); }), cat(stage, {"fsync:" + g.dir(), "barrier"}), "another backend orders");
+	check(warning_calls == 2 && warnings.size() == 1, "a volume warns once per process");
+
+	// Another volume warns once more; an internal Apple SSD never does, and stays classified.
+	const auto volumes = other_volumes(base);
+	auto other = volume_io(volumes[0], &other_storage);
+	expect(run([&] { other->order_files_and_directory({}); }), {"fsync", "barrier"}, "an ordering point on another volume");
+	check(warnings.size() == 2 && warnings.back().device == device_of(volumes[0]) && warnings.back().volume == volumes[0].string(),
+		"another volume warns with its own device and mount point");
+	auto again = volume_io(volumes[0], &other_storage);
+	run([&] { again->order_files_and_directory({}); });
+	check(warning_calls == 3 && warnings.size() == 2, "the other volume warns once");
+	auto apple = volume_io(volumes[1], &apple_storage);
+	expect(run([&] { apple->order_files_and_directory({}); }), {"fsync", "barrier"}, "an ordering point on an Apple SSD");
+	auto later = volume_io(volumes[1], &other_storage);
+	run([&] { later->order_files_and_directory({}); });
+	check(warning_calls == 3, "an internal Apple SSD never warns, and its volume is classified once");
+}
+
+// What IOKit finds under base's volume. With COMPLETION_EXPECT_STORAGE=apple or other (a run on a
+// known device: an internal Apple SSD, a disk image), the real classifier and the real sync calls
+// warn exactly when it is other; the seamed barrier_warning would then find the volume classified.
+bool real_storage(const std::filesystem::path& base) {
+	struct statfs volume{};
+	check(::statfs(base.c_str(), &volume) == 0, "statfs base");
+	const auto storage = j::detail::barrier_storage(volume);
+	std::cout << "barrier storage of " << mount_point(volume) << " (" << mount_source(volume) << "): " << storage.name
+		<< (storage.apple_ssd ? ", an internal Apple SSD\n" : ", warns\n");
+	check(storage == j::detail::barrier_storage(volume), "the classification is stable");
+	const char* expected = std::getenv("COMPLETION_EXPECT_STORAGE");
+	if (!expected) { return false; }
+	const std::string_view want(expected);
+	check(want == "apple" || want == "other", "COMPLETION_EXPECT_STORAGE is apple or other");
+	check(storage.apple_ssd == (want == "apple"), "the storage is classified as expected");
+	std::filesystem::create_directory(base / "real");
+	std::filesystem::permissions(base / "real", std::filesystem::perms::owner_all);
+	j::PosixIO io(base / "real", 0600, warned());
+	auto file = io.create_exclusive("a");
+	check(file->write_at(0, "bytes") == 5, "write");
+	j::File* group[] = {file.get()};
+	io.order_files_and_directory(group);
+	io.order_files_and_directory(group);
+	io.sync_directory();
+	check(warning_calls == (want == "other" ? 1 : 0), "the real barrier warns once on other storage and never on an Apple SSD");
+	if (want == "other") {
+		check(warnings.size() == 1 && warnings.front().storage == storage && warnings.front().volume == mount_point(volume),
+			"the real warning names the volume and its storage");
+	}
+	return true;
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -201,6 +355,7 @@ int main(int argc, char **argv) {
 	const std::filesystem::path base(argv[1]);
 	std::filesystem::remove_all(base);
 	std::filesystem::create_directory(base);
+	if (!real_storage(base)) { barrier_warning(base); }
 	ordering_protocol(base);
 	flush_target(base);
 	errno_rule(base);
@@ -209,8 +364,43 @@ int main(int argc, char **argv) {
 	return 0;
 }
 #else
-int main() {
-	std::cout << "sync_calls: skipped (macOS only)\n";
+// Linux and FreeBSD order with the durable sequence and never call the barrier warning.
+namespace {
+std::vector<std::string> calls;
+int record_fsync(int fd) { calls.push_back("fsync:" + std::to_string(fd)); return ::fsync(fd); }
+}
+int main(int argc, char **argv) {
+	if (argc != 2) {
+		std::cerr << "usage: completion_sync_calls_test DIRECTORY\n";
+		return 2;
+	}
+	const std::filesystem::path base(argv[1]);
+	std::filesystem::remove_all(base);
+	std::filesystem::create_directories(base / "never-warns");
+	std::filesystem::permissions(base / "never-warns", std::filesystem::perms::owner_all);
+	int warnings = 0;
+	j::PosixIO io(base / "never-warns", 0600, {.barrier_warning = [&](const j::BarrierWarning&) { ++warnings; }});
+	std::vector<std::unique_ptr<j::File>> files;
+	std::vector<j::File*> all;
+	for (const char *name : {"a", "b", "c"}) {
+		files.push_back(io.create_exclusive(name));
+		all.push_back(files.back().get());
+	}
+#ifdef __linux__
+	io.replace_sync_calls(&record_fsync, nullptr);
+#else
+	io.replace_sync_calls(&record_fsync);
+#endif
+	io.order_files_and_directory(all);
+	const auto ordered = std::exchange(calls, {});
+	io.sync_files_and_directory(all);
+	const auto durable = std::exchange(calls, {});
+	io.order_files_and_directory({});
+	if (ordered != durable || ordered.size() != 4 || calls.size() != 1 || warnings != 0) {
+		std::cerr << "failed: ordering is the durable sequence and never warns\n";
+		return 1;
+	}
+	std::cout << "sync_calls: ok (no barrier, no warning)\n";
 	return 0;
 }
 #endif

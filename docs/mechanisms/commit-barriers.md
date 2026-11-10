@@ -31,7 +31,7 @@ The order of calls in one commit (`posix.h:607` and `posix.h:614`):
 
 Apple documents `F_BARRIERFSYNC` as implemented on HFS and APFS and requiring hardware support that Apple SSDs are guaranteed to provide. On external or third-party drives, Fusion or AppleRAID sets and virtual disks, what APFS does with the call is undocumented. If it degrades to a plain `fsync`, a power loss can leave a visible manifest whose files are not on the media. Strata refuses to open that index rather than serve wrong data, and acknowledged commits stay durable through the final `F_FULLFSYNC`.
 
-The owner ruled on 2026-10-29 that non-Apple storage keeps the barrier with a warning, and `full_flush_ordering` is the opt-in for hosts that cannot vouch for their storage (`docs/reviews/commit-barriers-durability.md` Q1 in strata, `docs/status/t11-barriers.md` item 4 in Xapiand). Neither completion nor strata emits the warning yet, and strata's index options do not wire the option: both are open host follow-ups (grep of `full_flush_ordering` and the barrier path in `strata/include` finds no use).
+The owner ruled on 2026-10-29 that non-Apple storage keeps the barrier with a warning, and `full_flush_ordering` is the opt-in for hosts that cannot vouch for their storage (`docs/reviews/commit-barriers-durability.md` Q1 in strata, `docs/status/t11-barriers.md` item 4 in Xapiand). `PosixIOOptions::barrier_warning` reports each volume where a barrier ordered on storage other than an internal Apple SSD, once per process (`barriers.md`).
 
 ## Numbers
 
