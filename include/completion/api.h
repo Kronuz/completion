@@ -45,6 +45,7 @@ using PosixIO = kronuz::journal::PosixIO;
 using PosixIOOptions = kronuz::journal::PosixIOOptions;
 using BarrierWarning = kronuz::journal::BarrierWarning;
 using BarrierStorage = kronuz::journal::BarrierStorage;
+using BarrierWarningCall = kronuz::journal::BarrierWarningCall;
 using kronuz::journal::make_posix_io;
 using Token = kronuz::journal::MutationToken;
 using Kind = kronuz::journal::PrimitiveKind;

@@ -197,14 +197,19 @@ void full_flush_option(const std::filesystem::path& base) {
 	expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "full_flush_ordering orders a directory alone in full");
 }
 
+// The context reaches the callback unchanged.
+int warning_context = 0;
 j::PosixIOOptions warned(j::PosixIOOptions options = {}) {
-	options.barrier_warning = [](const j::BarrierWarning& warning) {
+	options.barrier_warning = [](void* context, const j::BarrierWarning& warning) {
+		check(context == &warning_context, "the callback receives its context");
 		++warning_calls;
 		if (warning_throws > 0) { --warning_throws; throw std::runtime_error("host callback failed"); }
 		warnings.push_back(warning);
 	};
+	options.barrier_warning_context = &warning_context;
 	return options;
 }
+[[maybe_unused]] constexpr j::PosixIOOptions literal_options{.full_flush_ordering = true};  // options stay a literal type
 j::BarrierStorage other_storage(const struct statfs&) { return {false, "test storage"}; }
 j::BarrierStorage apple_storage(const struct statfs&) { return {true, "APPLE SSD test (PCI-Express, Internal)"}; }
 std::string mount_point(const struct statfs& status) { return std::string(status.f_mntonname, ::strnlen(status.f_mntonname, sizeof status.f_mntonname)); }
@@ -378,8 +383,9 @@ int main(int argc, char **argv) {
 	std::filesystem::remove_all(base);
 	std::filesystem::create_directories(base / "never-warns");
 	std::filesystem::permissions(base / "never-warns", std::filesystem::perms::owner_all);
-	int warnings = 0;
-	j::PosixIO io(base / "never-warns", 0600, {.barrier_warning = [&](const j::BarrierWarning&) { ++warnings; }});
+	static int warnings = 0;
+	constexpr j::PosixIOOptions options{.barrier_warning = [](void*, const j::BarrierWarning&) { ++warnings; }};
+	j::PosixIO io(base / "never-warns", 0600, options);
 	std::vector<std::unique_ptr<j::File>> files;
 	std::vector<j::File*> all;
 	for (const char *name : {"a", "b", "c"}) {

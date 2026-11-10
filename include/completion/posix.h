@@ -32,7 +32,6 @@
 #include <cstring>
 #include <filesystem>
 #include <fcntl.h>
-#include <functional>
 #include <mutex>
 #include <dirent.h>
 #include <limits>
@@ -318,6 +317,8 @@ struct BarrierWarning {
 	std::string source;        // what it is mounted from (/dev/disk4s1, //host/share)
 	BarrierStorage storage;
 };
+// The host's barrier warning: a plain function and its context keep PosixIOOptions a literal type.
+using BarrierWarningCall = void (*)(void* context, const BarrierWarning& warning);
 
 #ifdef __APPLE__
 namespace detail {
@@ -602,8 +603,9 @@ struct PosixIOOptions {
 	// macOS: called once per volume per process, after the first barrier that ordered without
 	// flushing on storage other than an internal Apple SSD, on the thread of that ordering call.
 	// An exception fails the call after its barrier, and the volume warns again. Never called
-	// elsewhere or with full_flush_ordering.
-	std::function<void(const BarrierWarning&)> barrier_warning;
+	// elsewhere or with full_flush_ordering. `barrier_warning_context` is its first argument.
+	BarrierWarningCall barrier_warning = nullptr;
+	void* barrier_warning_context = nullptr;
 };
 
 class PosixIO final : public IO {
@@ -613,12 +615,12 @@ public:
 	// symlink, a foreign owner, and a group/other-writable mode are rejected here;
 	// `options` admits them (see directory_trust to warn). Entries stay no-follow.
 	explicit PosixIO(const std::filesystem::path& directory, unsigned artifact_mode = 0600, PosixIOOptions options = {})
-		: PosixIO(kronuz::io::completion::AllocationContext{}, directory, artifact_mode, std::move(options)) {}
+		: PosixIO(kronuz::io::completion::AllocationContext{}, directory, artifact_mode, options) {}
 	PosixIO(kronuz::io::completion::AllocationContext context, const std::filesystem::path& directory,
 		unsigned artifact_mode = 0600, PosixIOOptions options = {})
 		: context_(std::move(context)),
 #ifdef __APPLE__
-		  barrier_warning_(std::move(options.barrier_warning)),
+		  barrier_warning_(options.barrier_warning), barrier_warning_context_(options.barrier_warning_context),
 #endif
 		  artifact_mode_(artifact_mode), full_flush_ordering_(options.full_flush_ordering) {
 		if (artifact_mode != 0600 && artifact_mode != 0640 && artifact_mode != 0644) {
@@ -875,7 +877,7 @@ private:
 				warning.source.assign(status.f_mntfromname, ::strnlen(status.f_mntfromname, sizeof status.f_mntfromname));
 				warning.storage = barrier_storage_(status);
 			}
-			if (!warning.storage.apple_ssd) { barrier_warning_(warning); }
+			if (!warning.storage.apple_ssd) { barrier_warning_(barrier_warning_context_, warning); }
 		} catch (...) {
 			{
 				std::lock_guard lock(volumes.mutex);
@@ -1015,7 +1017,8 @@ private:
 	StatfsCall statfs_ = nullptr;
 #endif
 #ifdef __APPLE__
-	std::function<void(const BarrierWarning&)> barrier_warning_;
+	BarrierWarningCall barrier_warning_ = nullptr;
+	void* barrier_warning_context_ = nullptr;
 	BarrierStorageCall barrier_storage_ = &detail::barrier_storage;
 	std::atomic<bool> barrier_noted_{false};
 #endif
@@ -1027,7 +1030,7 @@ private:
 inline std::shared_ptr<PosixIO> make_posix_io(kronuz::io::completion::AllocationContext context,
 	const std::filesystem::path& directory, unsigned artifact_mode = 0600, PosixIOOptions options = {}) {
 	return std::allocate_shared<PosixIO>(kronuz::io::completion::OwnedAllocator<PosixIO>(context),
-		context, directory, artifact_mode, std::move(options));
+		context, directory, artifact_mode, options);
 }
 
 } // namespace kronuz::journal
