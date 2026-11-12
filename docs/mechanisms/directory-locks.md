@@ -23,18 +23,18 @@ One `IO` holds one directory lock of either kind: the shared and the exclusive l
 1. Release the reader's `OwnerLock`.
 2. Call `acquire_directory_owner()`.
 
-Between the two, the directory is unlocked by this IO: another IO or process may take either lock, and the upgrade is busy. On busy the caller takes the shared lock back (itself busy while a writer holds the exclusive lock) and decides what it read is still valid. Two shared holders upgrading at once cannot both win: the first to release is busy beside the other, which is still shared.
+Between the two, the directory is unlocked by this IO: another IO or process may take either lock, and the upgrade is busy. On busy the caller takes the shared lock back (itself busy while a writer holds the exclusive lock) and decides what it read is still valid. Of two shared holders upgrading at once, at most one wins, and both lose when each tries while the other still holds its shared lock.
 
-`flock` itself converts a held lock by dropping it first, so a single-call conversion would have the same window without saying so; the claim keeps the IO from issuing one (a second `flock` on its one open file description would convert the lock, and one release would free both holders).
+`flock` converts a held lock differently by platform. Linux drops the shared lock first, so a failed non-blocking conversion holds nothing; macOS keeps the shared lock when a `LOCK_EX | LOCK_NB` conversion fails (review probe job 261112-044718-59b2ef, Darwin 24.6); FreeBSD is untested. The claim keeps the IO from converting in one call (a second `flock` on its one open file description would convert the lock, and one release would free both holders), so every platform has the same two steps and the same window.
 
 ## How PosixIO does it
 
 - `PosixIO` opens the directory once (`directory_`). Each lock is a `flock` on that descriptor: `LOCK_EX | LOCK_NB` for the owner, `LOCK_SH | LOCK_NB` for the reader. Locks belong to the open file description, so two `PosixIO` objects on one directory, in one process or two, contend like two processes.
 - **The claim.** `directory_claimed_` (an atomic exchange) admits one directory lock per IO; threads racing through one IO end with exactly one winner. A failed `flock` unwinds through the `Owner`'s destructor: `LOCK_UN` on the IO's own descriptor, then the claim cleared, so a loser never releases what another IO holds.
-- **Errors.** `lock_exclusive` and `lock_shared` differ only in the `flock` operation; both report through `lock_failed`, the one errno mapping.
+- **One helper.** `lock(fd, kind, ...)` takes `LOCK_EX` or `LOCK_SH`, retries `EINTR`, and maps errors once for both.
 - **Death and renames.** The kernel releases a dead process's locks; the lock follows the directory's inode across a rename.
 
 ## Evidence
 
 - `test/owner_lock_test.cc`: the reader in the pairing matrix (every mode against every mode, in both orders, across processes, distinct IO objects and one IO), `readers` (coexistence, the last release freeing the exclusive lock), `upgrade` (the refusal, the window, two upgrading readers), `concurrent_readers` (two threads, one IO or two, against the sequential outcome), and the EINTR, unsupported, partial-failure and base cases.
-- `test/mutants/reader_shared_as_exclusive.sh`: the reader taking `LOCK_EX` fails the matrix's reader-beside-reader pairing.
+- `tools/mutants.py` m15: the reader taking `LOCK_EX` fails the matrix's reader-beside-reader pairing; m2 (no EINTR retry) covers both kinds.
