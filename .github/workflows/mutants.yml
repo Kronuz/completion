@@ -1,5 +1,5 @@
 name: mutants
-# The 25 mutants (owner lock, sync primitives, staging) against the suite (tools/mutants.py): one build and one ctest run
+# The 24 mutants (owner lock, sync primitives, staging) against the suite (tools/mutants.py): one build and one ctest run
 # each, so it runs by hand rather than on every push.
 on:
   workflow_dispatch:

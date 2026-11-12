@@ -3,11 +3,11 @@
 # SPDX-License-Identifier: MIT
 """Mutation check of the owner lock and the SyncFiles and OrderFiles primitives.
 
-Applies each of 25 small breaks to the owner-lock, sync and staging code (include/completion/posix.h, io.h, image.h)
+Applies each of 24 small breaks to the owner-lock, sync and staging code (include/completion/posix.h, io.h, image.h)
 in a scratch copy of the repository, rebuilds the CTest suite, runs it, and requires the
 outcome to be the one expected: the suite fails (the mutant is killed) or, for the mutants
 whose break nothing can observe, passes (it survives). m1 to m14 are the ones the CL-2 review
-(docs/reviews/cl-2-code.md, finding CL2-5) listed, and m15 breaks the shared directory lock; s1 to s8 break the sync primitives and the read-only opens (the device
+(docs/reviews/cl-2-code.md, finding CL2-5) listed; s1 to s8 break the sync primitives and the read-only opens (the device
 flush, the ordering barrier, the directory sync, a file's fsync, which primitive runs, the read-only flag); t1 and t2 break the
 Stage policy of image preparation (the stop before the sync, the close after a failure). Each is an exact-anchor replacement
 that must match exactly once.
@@ -55,19 +55,19 @@ def lines(*parts):
     return "\n".join(parts)
 
 
-# The anchors are the owner-lock code of PosixIO::lock_owner, lock, acquire_directory_reader and Owner.
-DIRECTORY_STEP = '\t\tif (directory) { lock(directory_, LOCK_EX, "lock journal directory", "directories"); }'
+# The anchors are the owner-lock code of PosixIO::lock_owner, lock_exclusive and Owner.
+DIRECTORY_STEP = '\t\tif (directory) { lock_exclusive(directory_, "lock journal directory", "directories"); }'
 FILE_STEP = lines(
     '\t\tif (file) {',
     '\t\t\tconst bool create = options.owner_file == OwnerFile::create_exclusive;',
     '\t\t\towner->hold_file(open_file("owner.lock", create));',
-    '\t\t\tlock(owner->fd(), LOCK_EX, "lock journal owner", "files");',
+    '\t\t\tlock_exclusive(owner->fd(), "lock journal owner", "files");',
     '\t\t\towner_fd_.store(owner->fd());',
     '\t\t\tif (create) { detail::file_sync(owner->fd()); }',
     '\t\t}')
 FILE_CLAIM = '\t\tif (file && !owner->claim_file()) { throw std::logic_error("journal directory already owned"); }'
 DIRECTORY_CLAIM = '\t\tif (directory && !owner->claim_directory()) { throw std::logic_error("journal directory already locked"); }'
-FLOCK_RETRY = '\t\tdo { result = flock_(fd, kind | LOCK_NB); } while (result < 0 && errno == EINTR);'
+FLOCK_RETRY = '\t\tdo { result = flock_(fd, LOCK_EX | LOCK_NB); } while (result < 0 && errno == EINTR);'
 UNSUPPORTED = '\t\tif (error == EOPNOTSUPP || error == ENOTSUP) {'
 RELEASE_FILE = lines(
     '\t\t\tif (fd_ >= 0) {',
@@ -82,11 +82,11 @@ MUTANTS = [
     Mutant("m1", "file before directory", POSIX,
            DIRECTORY_STEP + "\n" + FILE_STEP, FILE_STEP + "\n" + DIRECTORY_STEP,
            why="a competing process wrote owner.lock while the directory was held"),
-    Mutant("m2", "no EINTR retry", POSIX, FLOCK_RETRY, '\t\tresult = flock_(fd, kind | LOCK_NB);',
+    Mutant("m2", "no EINTR retry", POSIX, FLOCK_RETRY, '\t\tresult = flock_(fd, LOCK_EX | LOCK_NB);',
            why="an interrupted flock escapes"),
     Mutant("m3", "file-only fallback on an unsupported directory", POSIX, DIRECTORY_STEP,
            lines('\t\tif (directory) {',
-                 '\t\t\ttry { lock(directory_, LOCK_EX, "lock journal directory", "directories"); }',
+                 '\t\t\ttry { lock_exclusive(directory_, "lock journal directory", "directories"); }',
                  '\t\t\tcatch (const std::system_error& error) { if (error.code() != std::errc::not_supported) { throw; } }',
                  '\t\t}'),
            why="both on a filesystem that does not lock directories must refuse"),
@@ -129,10 +129,6 @@ MUTANTS = [
     Mutant("m14", "owner_fd_ not recorded", POSIX, '\t\t\towner_fd_.store(owner->fd());', '',
            expect={"Darwin": "killed", "default": "survived"},
            why="only the macOS directory sync reads owner_fd_ (it flushes through the owner file)"),
-    Mutant("m15", "reader takes LOCK_EX", POSIX,
-           '\t\tlock(directory_, LOCK_SH, "share journal directory", "directories");',
-           '\t\tlock(directory_, LOCK_EX, "share journal directory", "directories");',
-           why="two shared holders exclude each other"),
     Mutant("s1", "no device flush after the staged fsyncs", POSIX,
            '\t\t\tdo { result = calls.full_sync(devices[i].fd); } while (result < 0 && errno == EINTR);',
            '\t\t\tdo { result = 0; } while (result < 0 && errno == EINTR);',

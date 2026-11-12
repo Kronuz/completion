@@ -195,15 +195,6 @@ public:
 	virtual std::unique_ptr<OwnerLock> acquire_directory_owner() {
 		throw std::logic_error("directory owner lock unsupported");
 	}
-	// The directory's shared lock, held while the returned lock lives; it writes nothing. Shared
-	// holders through other IO objects coexist; a shared holder and an exclusive directory lock
-	// (directory or both mode) make each other busy; owner.lock (file mode) excludes neither.
-	// Busy and not_supported as acquire_owner's. One IO holds one directory lock of either kind,
-	// so an upgrade is two steps the caller owns: release this lock, then take the exclusive
-	// one, and another holder may lock between them (docs/mechanisms/directory-locks.md).
-	virtual std::unique_ptr<OwnerLock> acquire_directory_reader() {
-		throw std::logic_error("directory reader lock unsupported");
-	}
 	// Admit reusable closed controls during startup. Into hooks use this same
 	// backend, reject live/foreign destinations before IO, and allocate no control.
 	virtual std::unique_ptr<File> make_closed_file() { throw std::logic_error("reusable file controls unsupported"); }

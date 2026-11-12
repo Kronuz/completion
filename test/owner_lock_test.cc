@@ -20,11 +20,10 @@
  * THE SOFTWARE.
  */
 
-// The one owner lock and the shared directory lock: every file/directory/both/reader pairing,
-// in both first-holder orders, through the legacy and options calls, across processes and
-// through distinct and shared IO objects; then shared holders and the two-step upgrade, partial
-// failure, EINTR, unsupported locks, create and recover, aliases, races, the lock's lifetime
-// through an image job, and owner.lock and root refusals.
+// The one owner lock: every file/directory/both pairing, in both first-holder orders,
+// through the legacy and options calls, across processes and through distinct and shared
+// IO objects; then partial failure, EINTR, unsupported locks, create and recover, aliases,
+// the lock's lifetime through an image job, and owner.lock and root refusals.
 #include "completion/api.h"
 #include "completion/image.h"
 #include <atomic>
@@ -103,25 +102,21 @@ template <class E, class F> bool throws(F&& f) {
 	return false;
 }
 
-// One way to take a lock: a mode through the legacy or the options call, or the directory's
-// shared lock (acquire_directory_reader).
+// One way to take an owner lock: a mode through the legacy or the options call.
 struct Holder {
 	Mode mode;
 	bool legacy;
 	const char* name;
-	bool shared = false;
 };
 constexpr Holder holders[] = {
 	{Mode::file, true, "file(bool)"}, {Mode::file, false, "file"},
 	{Mode::directory, true, "directory()"}, {Mode::directory, false, "directory"},
-	{Mode::both, false, "both"}, {Mode::directory, false, "reader", true},
+	{Mode::both, false, "both"},
 };
 constexpr int holder_count = sizeof holders / sizeof holders[0];
-constexpr int reader_index = 5;
 
 // Creates owner.lock when it is absent, else opens it: the create and recover paths.
 std::unique_ptr<j::OwnerLock> acquire(j::IO& io, const Holder& holder, const fs::path& directory) {
-	if (holder.shared) { return io.acquire_directory_reader(); }
 	const bool create = holder.mode != Mode::directory && !fs::exists(fs::symlink_status(directory / "owner.lock"));
 	if (holder.legacy) { return holder.mode == Mode::file ? io.acquire_owner(create) : io.acquire_directory_owner(); }
 	return io.acquire_owner(j::OwnerLockOptions{holder.mode,
@@ -151,26 +146,9 @@ Outcome attempt(j::IO& io, const Holder& holder, const fs::path& directory) {
 		return Outcome::failed;
 	}
 }
-enum class Topology { processes, distinct, shared };
-const char* name(Topology topology) {
-	switch (topology) {
-	case Topology::processes: return "separate processes";
-	case Topology::distinct: return "distinct IO objects";
-	case Topology::shared: return "one shared IO object";
-	}
-	return "?";
-}
-
-// What the second holder gets while the first holds. File mode beside a directory-only lock
-// (exclusive or shared) acquires: they lock different inodes. Shared holders coexist across
-// IO objects; one IO holds one directory lock of either kind, so it refuses a second.
-Outcome expected(const Holder& first, const Holder& second, Topology topology) {
-	if ((first.mode == Mode::file && second.mode == Mode::directory) ||
-		(first.mode == Mode::directory && second.mode == Mode::file)) {
-		return Outcome::acquired;
-	}
-	if (topology == Topology::shared) { return Outcome::refused; }
-	return first.shared && second.shared ? Outcome::acquired : Outcome::busy;
+// Only the legacy file/directory pairing fails to exclude: they lock different inodes.
+bool excludes(Mode first, Mode second) {
+	return !((first == Mode::file && second == Mode::directory) || (first == Mode::directory && second == Mode::file));
 }
 
 // Child modes: "try" exits 0 busy, 3 acquired, 5 refused, 4 otherwise; "hold" writes a byte
@@ -244,22 +222,31 @@ Child hold(const char* self, int index, const fs::path& directory) {
 	return holder;
 }
 
+enum class Topology { processes, distinct, shared };
+const char* name(Topology topology) {
+	switch (topology) {
+	case Topology::processes: return "separate processes";
+	case Topology::distinct: return "distinct IO objects";
+	case Topology::shared: return "one shared IO object";
+	}
+	return "?";
+}
+
 // Every ordered pairing in one topology. A competing owner is busy, or refused through the
 // holder's own IO, and writes nothing; after the holder releases, it acquires.
 void matrix(const char* self, const fs::path& directory, Topology topology) {
 	std::cout << "owner_lock: " << name(topology) << " (rows hold first; x excludes, A acquires)\n  " << std::setw(12) << "";
 	for (const auto& second : holders) { std::cout << ' ' << second.name; }
 	std::cout << '\n';
-	int excluded = 0, acquired = 0;
+	int excluded = 0, unsafe = 0;
 	for (int a = 0; a < holder_count; ++a) {
 		std::cout << "  " << std::left << std::setw(12) << holders[a].name << std::right;
 		for (int b = 0; b < holder_count; ++b) {
 			const auto& first = holders[a];
 			const auto& second = holders[b];
 			fresh(directory);
-			const Outcome expect = expected(first, second, topology);
-			// A shared holder's lock is still in place when an exclusive directory lock is busy.
-			const int own = first.shared ? 3 : a;
+			const bool expect = excludes(first.mode, second.mode);
+			const Outcome blocked = topology == Topology::shared ? Outcome::refused : Outcome::busy;
 			Outcome got;
 			if (topology == Topology::processes) {
 				auto holder = hold(self, a, directory);
@@ -268,7 +255,7 @@ void matrix(const char* self, const fs::path& directory, Topology topology) {
 				got = outcome_of(reap(other));
 				if (got != Outcome::acquired) { check(snapshot(directory) == before, "a competing process writes nothing"); }
 				// The failed attempt left the holder's lock in place.
-				auto again = spawn(self, "try", own, directory);
+				auto again = spawn(self, "try", a, directory);
 				check(outcome_of(reap(again)) == Outcome::busy, "the holder still excludes its own mode");
 				check(reap(holder) == 0, "the holder released cleanly");
 				auto after = spawn(self, "try", b, directory);
@@ -280,26 +267,23 @@ void matrix(const char* self, const fs::path& directory, Topology topology) {
 				const auto before = snapshot(directory);
 				got = attempt(competitor, second, directory);
 				if (got != Outcome::acquired) { check(snapshot(directory) == before, "a competing owner writes nothing"); }
-				check(attempt(third, holders[own], directory) == Outcome::busy, "the holder still excludes its own mode");
+				check(attempt(third, first, directory) == Outcome::busy, "the holder still excludes its own mode");
 				lock.reset();
 				check(attempt(competitor, second, directory) == Outcome::acquired, "a released lock is free to the competitor");
 			}
-			if (got != expect) {
+			if (expect ? got != blocked : got != Outcome::acquired) {
 				std::cerr << "\nowner_lock: " << name(topology) << ": " << first.name << " then " << second.name
-					<< ": " << name(got) << ", expected " << name(expect) << '\n';
+					<< ": " << name(got) << ", expected " << (expect ? name(blocked) : "acquired") << '\n';
 				std::exit(1);
 			}
-			const bool excludes = expect != Outcome::acquired;
-			(excludes ? excluded : acquired) += 1;
-			std::cout << ' ' << std::string(std::string_view(second.name).size() - 1, ' ') << (excludes ? 'x' : 'A');
+			(expect ? excluded : unsafe) += 1;
+			std::cout << ' ' << std::string(std::string_view(second.name).size() - 1, ' ') << (expect ? 'x' : 'A');
 		}
 		std::cout << '\n';
 	}
-	std::cout << "owner_lock: " << name(topology) << ": " << excluded << " excluded, " << acquired
-		<< " acquired (file beside a directory-only lock; reader beside reader across IO objects)\n";
-	// 12 file/directory-only pairings acquire; reader beside reader acquires unless one IO holds both.
-	const int coexisting = topology == Topology::shared ? 0 : 1;
-	check(acquired == 12 + coexisting && excluded == 24 - coexisting, "the pairings' expected split");
+	std::cout << "owner_lock: " << name(topology) << ": " << excluded << " excluded, " << unsafe
+		<< " legacy file/directory controls acquired\n";
+	check(excluded == 17 && unsafe == 8, "17 excluding pairings and 8 unsafe controls");
 }
 
 // What a successful acquisition leaves: one zero-length 0600 owner.lock for a create,
@@ -368,11 +352,9 @@ struct Injection {
 	int directory_eintr = 0, file_eintr = 0;
 	int directory_errno = 0, file_errno = 0;
 	int calls = 0;
-	int operation = 0;  // the last call's
 } injection;
 int injected_flock(int fd, int operation) {
 	++injection.calls;
-	injection.operation = operation;
 	const bool directory = fd == injection.directory_fd;
 	int& eintr = directory ? injection.directory_eintr : injection.file_eintr;
 	if (eintr > 0) {
@@ -433,13 +415,8 @@ void partial_failure(const fs::path& directory) {
 		check(error_of([&] { (void)empty.acquire_owner(create); }) == std::error_code(error, std::generic_category()),
 			"the directory step's error survives");
 		check(fs::is_empty(directory) && lowest_fd() == empty_fds, "nothing created after a failed directory step");
-		check(error_of([&] { (void)empty.acquire_directory_reader(); }) == std::error_code(error, std::generic_category()),
-			"the shared lock's error survives");
-		check(lowest_fd() == empty_fds && directory_free(directory), "a failed shared lock holds nothing");
 	}
 	empty.replace_flock(nullptr);
-	auto reader = empty.acquire_directory_reader();
-	check(!directory_free(directory), "the IO takes the shared lock after the failures");
 }
 
 // EINTR is retried at either step; a busy answer behind EINTR is still busy.
@@ -460,19 +437,6 @@ void interrupted(const fs::path& directory) {
 		"busy behind EINTR");
 	inject(io, {.file_eintr = 2});
 	check(error_of([&] { (void)io.acquire_owner(false); }) == std::errc::operation_would_block, "busy behind EINTR (file)");
-	inject(io, {.directory_eintr = 2});
-	check(error_of([&] { (void)io.acquire_directory_reader(); }) == std::errc::operation_would_block, "busy behind EINTR (shared)");
-	held.reset();
-	inject(io, {.directory_eintr = 3});
-	{
-		auto lock = io.acquire_directory_reader();
-		check(injection.calls == 4 && injection.operation == (LOCK_SH | LOCK_NB), "three retries, then one shared nonblocking flock");
-	}
-	inject(io, {});
-	{
-		auto lock = io.acquire_directory_owner();
-		check(injection.calls == 1 && injection.operation == (LOCK_EX | LOCK_NB), "the owner's directory flock is exclusive");
-	}
 	io.replace_flock(nullptr);
 }
 
@@ -487,7 +451,6 @@ void unsupported(const fs::path& directory) {
 		check(error_of([&] { (void)io.acquire_owner(j::OwnerLockOptions{Mode::directory}); }) == std::errc::not_supported,
 			"directory is not_supported");
 		check(error_of([&] { (void)io.acquire_directory_owner(); }) == std::errc::not_supported, "legacy directory too");
-		check(error_of([&] { (void)io.acquire_directory_reader(); }) == std::errc::not_supported, "the shared lock too");
 		check(fs::is_empty(directory), "no owner.lock as a fallback");
 	}
 	{
@@ -567,113 +530,6 @@ void concurrent(const fs::path& directory) {
 	}
 }
 
-bool busy_code(std::error_code code) {
-	return code == std::errc::operation_would_block || code == std::errc::resource_unavailable_try_again;
-}
-
-// Shared holders coexist across IO objects and processes and write nothing; the exclusive lock,
-// in either mode that takes the directory, is busy until the last of them releases.
-void readers(const char* self, const fs::path& directory) {
-	j::PosixIO a(fresh(directory)), b(directory), writer(directory);
-	const auto before = snapshot(directory);
-	const j::OwnerLockOptions both{Mode::both, j::OwnerFile::create_exclusive};
-	auto first = a.acquire_directory_reader();
-	auto second = b.acquire_directory_reader();
-	check(snapshot(directory) == before, "shared locks write nothing");
-	auto exclusive_busy = [&](const char* what) {
-		check(busy_code(error_of([&] { (void)writer.acquire_directory_owner(); })), what);
-		check(busy_code(error_of([&] { (void)writer.acquire_owner(both); })), what);
-		check(snapshot(directory) == before, "a busy exclusive attempt writes nothing");
-	};
-	exclusive_busy("busy beside two shared holders");
-	first.reset();
-	exclusive_busy("busy beside the last shared holder");
-	auto other = hold(self, reader_index, directory);
-	second.reset();
-	exclusive_busy("busy beside a shared holder in another process");
-	{
-		auto beside = a.acquire_directory_reader();
-		check(reap(other) == 0, "the other process released");
-		exclusive_busy("busy after another process released, beside this one");
-	}
-	{
-		auto lock = writer.acquire_directory_owner();
-		check(busy_code(error_of([&] { (void)a.acquire_directory_reader(); })), "a shared lock is busy beside the owner");
-		auto attempt = spawn(self, "try", reader_index, directory);
-		check(outcome_of(reap(attempt)) == Outcome::busy, "and in another process");
-	}
-	auto lock = writer.acquire_owner(both);
-	check(fs::exists(directory / "owner.lock"), "the exclusive lock is free once every shared holder released");
-}
-
-// The upgrade is two steps the caller owns: the IO refuses the exclusive lock while it holds the
-// shared one, leaving it shared, and another holder can lock between the release and the lock.
-void upgrade(const fs::path& directory) {
-	j::PosixIO io(fresh(directory)), other(directory);
-	auto shared = io.acquire_directory_reader();
-	check(throws<std::logic_error>([&] { (void)io.acquire_directory_owner(); }), "no exclusive lock over a held shared one");
-	check(throws<std::logic_error>([&] { (void)io.acquire_directory_reader(); }), "nor a second shared lock");
-	check(busy_code(error_of([&] { (void)other.acquire_directory_owner(); })), "the refusal left the lock in place");
-	{ auto beside = other.acquire_directory_reader(); }
-	shared.reset();
-	{
-		auto exclusive = io.acquire_directory_owner();
-		check(busy_code(error_of([&] { (void)other.acquire_directory_reader(); })), "upgraded: a shared lock is busy");
-	}
-	// Another IO takes the directory in the window: the upgrade is busy, and so is the way back.
-	shared = io.acquire_directory_reader();
-	shared.reset();
-	{
-		auto winner = other.acquire_directory_owner();
-		check(busy_code(error_of([&] { (void)io.acquire_directory_owner(); })), "the upgrade loses the window");
-		check(busy_code(error_of([&] { (void)io.acquire_directory_reader(); })), "and holds no lock until the winner releases");
-	}
-	// Two shared holders upgrading: the one that goes first is busy beside the other, and takes its
-	// shared lock back; the other then upgrades the same way, once the first released again.
-	shared = io.acquire_directory_reader();
-	auto theirs = other.acquire_directory_reader();
-	shared.reset();
-	check(busy_code(error_of([&] { (void)io.acquire_directory_owner(); })), "busy beside the other shared holder");
-	shared = io.acquire_directory_reader();
-	theirs.reset();
-	check(busy_code(error_of([&] { (void)other.acquire_directory_owner(); })), "the other is busy beside the first");
-	shared.reset();
-	auto upgraded = other.acquire_directory_owner();
-}
-
-// Two threads at once, through one IO or two, end as some sequential order would: through one
-// IO exactly one directory lock wins; through two, two shared locks both win and a shared lock
-// racing an exclusive one leaves one. The loser's unwind never releases what a winner holds.
-void concurrent_readers(const fs::path& directory) {
-	constexpr int iterations = 300;
-	struct Case { bool exclusive_second, one_io; int winners; };
-	for (const auto& race : {Case{false, true, 1}, Case{true, true, 1}, Case{false, false, 2}, Case{true, false, 1}}) {
-		for (int i = 0; i < iterations; ++i) {
-			j::PosixIO first(fresh(directory)), second(directory);
-			j::PosixIO* ios[2] = {&first, race.one_io ? &first : &second};
-			std::atomic<int> ready{0}, acquired{0};
-			std::unique_ptr<j::OwnerLock> locks[2];
-			auto take = [&](int index) {
-				ready.fetch_add(1);
-				while (ready.load() < 2) {}
-				try {
-					locks[index] = index == 1 && race.exclusive_second ? ios[index]->acquire_directory_owner()
-						: ios[index]->acquire_directory_reader();
-					acquired.fetch_add(1);
-				} catch (const std::exception&) {}
-			};
-			std::thread one(take, 0), two(take, 1);
-			one.join();
-			two.join();
-			check(acquired.load() == race.winners, "the race ends as a sequential order would");
-			check(!directory_free(directory), "the winners still hold the directory");
-			locks[0].reset();
-			locks[1].reset();
-			check(directory_free(directory), "released once the winners are dropped");
-		}
-	}
-}
-
 // An IO with only the legacy bool call: the options call reports not_supported in every
 // mode and never forwards to it. A wrapper forwards lock_owner to its backend's acquire_owner.
 struct LegacyIO final : j::IO {
@@ -714,8 +570,6 @@ void base(const fs::path& directory) {
 	}
 	check(legacy.calls == 0, "and never reaches the legacy call");
 	check(throws<std::logic_error>([&] { (void)io.acquire_directory_owner(); }), "the base directory call is unchanged");
-	check(throws<std::logic_error>([&] { (void)io.acquire_directory_reader(); }), "the base shared call throws as it does");
-	check(legacy.calls == 0, "and neither reaches the legacy call");
 	j::PosixIO posix(fresh(directory));
 	WrapperIO wrapper(posix);
 	auto lock = static_cast<j::IO&>(wrapper).acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive});
@@ -820,11 +674,8 @@ int main(int argc, char** argv) {
 	partial_failure(directory);
 	interrupted(directory);
 	unsupported(directory);
-	readers(argv[0], directory);
-	upgrade(directory);
 	aliases(directory);
 	concurrent(directory);
-	concurrent_readers(directory);
 	base(directory);
 	lifetime(directory);
 	refusals(directory);

@@ -665,14 +665,6 @@ public:
 	std::unique_ptr<OwnerLock> acquire_directory_owner() override {
 		return acquire_owner(OwnerLockOptions::legacy_directory());
 	}
-	// The shared lock takes the directory claim as the exclusive one does, so one IO holds
-	// one directory lock of either kind; a second is refused before it locks.
-	std::unique_ptr<OwnerLock> acquire_directory_reader() override {
-		auto reader = control<Owner>(*this);
-		if (!reader->claim_directory()) { throw std::logic_error("journal directory already locked"); }
-		lock(directory_, LOCK_SH, "share journal directory", "directories");
-		return reader;
-	}
 	// What the root was found to be at construction, for a caller to warn on.
 	DirectoryTrust directory_trust() const override { return trust_; }
 	// The directory's filesystem, so a caller can warn when it is not known local.
@@ -920,9 +912,9 @@ private:
 		}
 		return *target;
 	}
-	// Holds the directory lock (exclusive or shared), owner.lock, or both; releases the file
-	// first. It releases only the claims it made, and a claim clears after its lock is gone,
-	// so a loser never frees what the winner holds.
+	// Holds the directory lock, owner.lock, or both; releases the file first. It releases only
+	// the claims it made, and a claim clears after its lock is gone, so a loser never frees
+	// what the winner holds.
 	class Owner : public OwnerLock {
 	public:
 		explicit Owner(PosixIO& io) : io_(io) {}
@@ -952,21 +944,21 @@ private:
 		auto owner = control<Owner>(*this);
 		if (file && !owner->claim_file()) { throw std::logic_error("journal directory already owned"); }
 		if (directory && !owner->claim_directory()) { throw std::logic_error("journal directory already locked"); }
-		if (directory) { lock(directory_, LOCK_EX, "lock journal directory", "directories"); }
+		if (directory) { lock_exclusive(directory_, "lock journal directory", "directories"); }
 		if (file) {
 			const bool create = options.owner_file == OwnerFile::create_exclusive;
 			owner->hold_file(open_file("owner.lock", create));
-			lock(owner->fd(), LOCK_EX, "lock journal owner", "files");
+			lock_exclusive(owner->fd(), "lock journal owner", "files");
 			owner_fd_.store(owner->fd());
 			if (create) { detail::file_sync(owner->fd()); }
 		}
 		return owner;
 	}
-	// LOCK_EX or LOCK_SH, nonblocking, retried on EINTR. Busy is EWOULDBLOCK; ENOTSUP and
+	// Exclusive and nonblocking, retried on EINTR. Busy is EWOULDBLOCK; ENOTSUP and
 	// EOPNOTSUPP are errc::not_supported, naming the filesystem.
-	void lock(int fd, int kind, const char* operation, const char* what) const {
+	void lock_exclusive(int fd, const char* operation, const char* what) const {
 		int result;
-		do { result = flock_(fd, kind | LOCK_NB); } while (result < 0 && errno == EINTR);
+		do { result = flock_(fd, LOCK_EX | LOCK_NB); } while (result < 0 && errno == EINTR);
 		if (result == 0) { return; }
 		const int error = errno == EAGAIN ? EWOULDBLOCK : errno;
 		if (error == EOPNOTSUPP || error == ENOTSUP) {
