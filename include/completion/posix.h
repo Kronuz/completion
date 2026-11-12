@@ -140,7 +140,7 @@ using FsyncCall = int (*)(int fd);
 using FcntlCall = int (*)(int fd, int command);
 inline int default_fcntl(int fd, int command) { return ::fcntl(fd, command); }
 // Errors a filesystem without F_BARRIERFSYNC returns: the vnode default is ENOTSUP and an
-// unrecognised command is ENOTTY (ENOTTY observed on APFS, FAT and exFAT volumes).
+// unrecognised command is ENOTTY (APFS, HFS+, FAT32 and exFAT volumes accept the barrier).
 inline bool barrier_unsupported(int error) { return error == ENOTSUP || error == EOPNOTSUPP || error == ENOTTY; }
 #endif
 #ifdef __linux__
@@ -454,7 +454,7 @@ struct BarrierVolumes {
 	std::vector<std::uint64_t> devices;
 };
 inline BarrierVolumes& barrier_volumes() {
-	static BarrierVolumes volumes;
+	static auto& volumes = *new BarrierVolumes;  // leaked: no exit-time destructor
 	return volumes;
 }
 } // namespace detail
