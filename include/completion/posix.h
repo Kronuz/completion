@@ -139,8 +139,8 @@ using FsyncCall = int (*)(int fd);
 #ifdef __APPLE__
 using FcntlCall = int (*)(int fd, int command);
 inline int default_fcntl(int fd, int command) { return ::fcntl(fd, command); }
-// Errors a filesystem without F_BARRIERFSYNC returns: the vnode default is ENOTSUP and an
-// unrecognised command is ENOTTY (APFS, HFS+, FAT32 and exFAT volumes accept the barrier).
+// Errors a filesystem without F_BARRIERFSYNC returns: ENOTSUP (the vnode default) or ENOTTY
+// (an unrecognised command). APFS, HFS+, FAT32 and exFAT accept the barrier.
 inline bool barrier_unsupported(int error) { return error == ENOTSUP || error == EOPNOTSUPP || error == ENOTTY; }
 #endif
 #ifdef __linux__
