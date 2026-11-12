@@ -665,6 +665,14 @@ public:
 	std::unique_ptr<OwnerLock> acquire_directory_owner() override {
 		return acquire_owner(OwnerLockOptions::legacy_directory());
 	}
+	// The shared lock takes the directory claim as the exclusive one does, so one IO holds
+	// one directory lock of either kind; a second is refused before it locks.
+	std::unique_ptr<OwnerLock> acquire_directory_reader() override {
+		auto reader = control<Owner>(*this);
+		if (!reader->claim_directory()) { throw std::logic_error("journal directory already locked"); }
+		lock_shared(directory_, "share journal directory", "directories");
+		return reader;
+	}
 	// What the root was found to be at construction, for a caller to warn on.
 	DirectoryTrust directory_trust() const override { return trust_; }
 	// The directory's filesystem, so a caller can warn when it is not known local.
@@ -912,7 +920,7 @@ private:
 		}
 		return *target;
 	}
-	// Holds the directory lock, owner.lock, or both; releases the file first. It releases only
+	// Holds the directory lock (exclusive or shared), owner.lock, or both; releases the file first. It releases only
 	// the claims it made, and a claim clears after its lock is gone, so a loser never frees
 	// what the winner holds.
 	class Owner : public OwnerLock {
@@ -954,12 +962,20 @@ private:
 		}
 		return owner;
 	}
-	// Exclusive and nonblocking, retried on EINTR. Busy is EWOULDBLOCK; ENOTSUP and
-	// EOPNOTSUPP are errc::not_supported, naming the filesystem.
+	// Exclusive or shared, nonblocking, retried on EINTR; a failure is lock_failed's.
 	void lock_exclusive(int fd, const char* operation, const char* what) const {
 		int result;
 		do { result = flock_(fd, LOCK_EX | LOCK_NB); } while (result < 0 && errno == EINTR);
-		if (result == 0) { return; }
+		if (result < 0) { lock_failed(operation, what); }
+	}
+	void lock_shared(int fd, const char* operation, const char* what) const {
+		int result;
+		do { result = flock_(fd, LOCK_SH | LOCK_NB); } while (result < 0 && errno == EINTR);
+		if (result < 0) { lock_failed(operation, what); }
+	}
+	// From the failed flock's errno: busy is EWOULDBLOCK; ENOTSUP and EOPNOTSUPP are
+	// errc::not_supported, naming the filesystem.
+	[[noreturn]] void lock_failed(const char* operation, const char* what) const {
 		const int error = errno == EAGAIN ? EWOULDBLOCK : errno;
 		if (error == EOPNOTSUPP || error == ENOTSUP) {
 			std::string name = "this filesystem";
