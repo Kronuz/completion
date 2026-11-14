@@ -286,3 +286,26 @@ nothing. An unsupported directory lock fails closed in `both`, so a filesystem w
 deployment filesystem first. Until every process that can address a directory takes the
 same protocol, keep it under one protocol: a directory-only owner is safe only where no
 file-only owner can ever reach the directory, including during creation.
+
+## 10. Apple libc strtod aborts independently of a strict parsing wrapper
+
+On x86_64 macOS 15.8.1 (24H32), a 209-byte input aborts a standalone C call to `strtod` in
+`divideMPByMP`, `strtofp.c:1390`. The same byte file also aborts strict-stox's nothrow `stod`
+entry points with and without a prefix index. `strtof`, `strtold`, and their wrapper forms
+return normally. The original 694-byte fuzz artifact produces the same matrix.
+
+The independent replay programs are `strict-stox:21212a1`; the crash is found while fuzzing
+`strict-stox:21c104b`. The minimized fixture's SHA-256 is
+`1c427b3bc8efe231014b1cabd4e8e6bf78025d18bc3175aeae0edea14d3d04f2`.
+The fixture, programs, CTest matrix, commands and raw output live in
+[strict-stox/fuzz/regressions](https://github.com/Kronuz/strict-stox/tree/codex/parser-fuzz/fuzz/regressions).
+The plain C executable includes no strict-stox header or sanitizer instrumentation. Its abort
+establishes the libc failure independently of the wrapper. A different input reaching the
+same Apple assertion is already recorded in strict-stox's `docs/perf/verification.md`.
+
+**For a consumer:** a strict wrapper that delegates syntax or rounding decisions to libc
+inherits that libc's assertions on those paths. Preserve the crash as a failing regression;
+a wrapper label or an exception API does not imply the underlying conversion cannot abort.
+The replay project reports six actual SIGABRT failures and twelve passes on this platform;
+it does not disable the failures or convert them to expected passes. No product-header
+workaround is claimed by this finding.
