@@ -95,7 +95,7 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     if(Python3_Interpreter_FOUND)
       add_test(NAME completion_mutants_anchors COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/mutants.py --check)
       # drive_synchronously stays the one synchronous loop (the seam's shape, by grep).
-      add_test(NAME completion_seam_shape COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tools/check_seam.py)
+      add_test(NAME completion_seam_shape COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/test/check_seam.py)
     endif()
     # The directory lock again on tmpfs, where Linux has one (/dev/shm); the test checks it is.
     if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND IS_DIRECTORY /dev/shm)

@@ -23,7 +23,7 @@ include/completion/
   api.h                 The kronuz::io::completion entry point.
 test/                   One suite per feature (core, allocation, scan, inspection, reuse, map, owner_lock, ...).
 bench/                  The platform probes behind PLATFORM_FINDINGS.md (sync, commit, unlink, directory flush); lane_probe.cc and lane_ab.py (docs/MEASUREMENTS.md, "Turn lane"); COMPLETION_BUILD_BENCH.
-tools/check_seam.py     Greps that drive_synchronously is the one synchronous loop (CTest completion_seam_shape).
+test/check_seam.py      Greps that drive_synchronously is the one synchronous loop (CTest completion_seam_shape).
 tools/mutants.py        The 14 owner-lock mutants of the CL-2 review, applied to a scratch copy and run against the suite.
 examples/demo.cc        Batched durability across two directories.
 docs/                   PLATFORM_FINDINGS.md, MEASUREMENTS.md, mechanisms/ (completion-seam.md: SyncData, the seam, the slot), completion.d2 (the README diagram's source).

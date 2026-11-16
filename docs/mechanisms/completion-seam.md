@@ -41,7 +41,7 @@ A driver is any type whose `run(std::shared_ptr<IOOperation>, task::cancel_token
 
 ## `InlineCompletion` and `drive_synchronously`
 
-`drive_synchronously(operation, proceed)` is the one loop: ask `proceed()`, mark submitted, run `execute_primitive`, hand the result to `operation.complete`, until `done()`. The one-argument form is `proceed = true` and is every existing caller's. `InlineCompletion::run` has no loop: it calls `drive_synchronously` with `proceed = !token.requested()` and throws `task::cancelled` when that stopped it. Nothing suspends, so the operation is done when the call returns. `tools/check_seam.py` (CTest `completion_seam_shape`) greps that `execute_primitive` is reached from `drive_synchronously`, the two queues' workers and `HeldCompletion::execute` only.
+`drive_synchronously(operation, proceed)` is the one loop: ask `proceed()`, mark submitted, run `execute_primitive`, hand the result to `operation.complete`, until `done()`. The one-argument form is `proceed = true` and is every existing caller's. `InlineCompletion::run` has no loop: it calls `drive_synchronously` with `proceed = !token.requested()` and throws `task::cancelled` when that stopped it. Nothing suspends, so the operation is done when the call returns. `test/check_seam.py` (CTest `completion_seam_shape`) greps that `execute_primitive` is reached from `drive_synchronously`, the two queues' workers and `HeldCompletion::execute` only.
 
 ## `HeldCompletion`
 
