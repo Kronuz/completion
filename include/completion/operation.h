@@ -24,6 +24,7 @@
 
 #include "io.h"
 #include <array>
+#include <cstdint>
 #include <exception>
 #include <span>
 #include <vector>
@@ -184,10 +185,19 @@ inline MutationCompletion execute_primitive(IO &io, const MutationRequest &reque
 }
 } // namespace detail
 
-inline void drive_synchronously(IOOperation &operation) {
+// The one synchronous loop, InlineCompletion's: runs the operation's primitives on the calling
+// thread until it is done. `proceed` is asked before each primitive is issued; false stops with
+// the operation unfinished and nothing in flight.
+template <class Proceed>
+bool drive_synchronously(IOOperation &operation, Proceed &&proceed) {
 	while (!operation.done()) {
+		if (!proceed()) { return false; }
 		operation.submitted();
 		operation.complete(detail::execute_primitive(operation.io(), operation.request()));
 	}
+	return true;
+}
+inline void drive_synchronously(IOOperation &operation) {
+	drive_synchronously(operation, [] { return true; });
 }
 } // namespace kronuz::journal
