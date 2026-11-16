@@ -67,6 +67,10 @@ struct MutationCompletion {
 	std::optional<EntryInspection> inspection;
 };
 
+// Which wait an operation's primitives join for a shared driver: a Turn's is admitted ahead of
+// every waiting Bulk one (artifact and snapshot IO). Nothing preempts a primitive in flight.
+enum class IOLane : std::uint8_t { Turn, Bulk };
+
 class IOOperation {
   public:
 	virtual ~IOOperation() = default;
@@ -76,6 +80,7 @@ class IOOperation {
 	virtual bool done() const noexcept = 0;
 	virtual bool in_flight() const noexcept = 0;
 	virtual IO &io() const noexcept = 0;
+	virtual IOLane lane() const noexcept { return IOLane::Bulk; }
 };
 
 namespace detail {

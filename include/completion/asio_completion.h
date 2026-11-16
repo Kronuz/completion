@@ -68,8 +68,9 @@ struct CompletionDriverMetrics {
 };
 
 // Optional task adapter over Asio. The generic journal and completion backend depend on
-// neither. The driver belongs to one task::asio_scheduler; only tasks running on it may
-// call run(), and one at a time.
+// neither. The driver belongs to one task::asio_scheduler; only tasks running on it may call
+// run(). The queue has one slot: any number of operations may run at once, and each primitive
+// takes the slot in the order its caller asked (a Turn's ahead of a Bulk's, see IOLane).
 template <class Queue>
 class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionDriver<Queue>> {
   public:
@@ -102,33 +103,99 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 	CompletionDriverStats stats() const noexcept {
 		return metrics_ ? metrics_->snapshot() : CompletionDriverStats{};
 	}
-	task::task<void> run(std::shared_ptr<IOOperation> operation) {
-		return drive(std::move(operation), false);
+	// The token is read before each primitive is issued, before and after its wait for the
+	// slot: requested, the primitive is not issued and the call throws task::cancelled. A
+	// primitive already issued completes into the operation first.
+	task::task<void> run(std::shared_ptr<IOOperation> operation, task::cancel_token token = {}) {
+		return drive(std::move(operation), false, std::move(token));
 	}
 	// Reap exactly one original primitive, then return control to the owner.
 	// This supports operations with explicit paused scheduling boundaries.
-	task::task<void> run_one(std::shared_ptr<IOOperation> operation) {
-		return drive(std::move(operation), true);
+	task::task<void> run_one(std::shared_ptr<IOOperation> operation, task::cancel_token token = {}) {
+		return drive(std::move(operation), true, std::move(token));
 	}
 
   private:
-	task::task<void> drive(std::shared_ptr<IOOperation> operation, bool single) {
+	// The queue's one slot. A primitive holds it from its submission to its reaping; the next
+	// waiter inherits it when it passes, posted to the owner, so the slot is never free while
+	// anyone waits. Everything here runs on the owner scheduler.
+	struct Waiter {
+		std::coroutine_handle<> handle;
+		Waiter *prev = nullptr, *next = nullptr;
+		bool linked = false;
+	};
+	struct Waiting {
+		Waiter *head = nullptr, *tail = nullptr;
+		void push(Waiter *waiter) noexcept {
+			waiter->prev = tail;
+			waiter->next = nullptr;
+			(tail ? tail->next : head) = waiter;
+			tail = waiter;
+			waiter->linked = true;
+		}
+		void erase(Waiter *waiter) noexcept {
+			(waiter->prev ? waiter->prev->next : head) = waiter->next;
+			(waiter->next ? waiter->next->prev : tail) = waiter->prev;
+			waiter->linked = false;
+		}
+		Waiter *pop() noexcept {
+			auto *waiter = head;
+			if (waiter) { erase(waiter); }
+			return waiter;
+		}
+	};
+	// Awaited before each primitive. A caller holding the slot from its previous primitive keeps
+	// it unless a waiter goes ahead of it; otherwise it hands the slot over and queues.
+	struct Admit {
+		AsioCompletionDriver &driver;
+		bool &holding;
+		Waiter waiter{};
+		bool await_ready() noexcept {
+			if (holding) { return !driver.waiter_ahead(); }
+			if (driver.slot_taken_) { return false; }
+			driver.slot_taken_ = true;
+			return true;
+		}
+		void await_suspend(std::coroutine_handle<> handle) noexcept {
+			waiter.handle = handle;
+			driver.waiting_.push(&waiter);
+			if (holding) {
+				holding = false;
+				driver.pass_slot();
+			}
+		}
+		void await_resume() noexcept { holding = true; }
+		~Admit() {
+			if (waiter.linked) { driver.waiting_.erase(&waiter); }
+		}
+	};
+	bool waiter_ahead() const noexcept { return waiting_.head != nullptr; }
+	void pass_slot() {
+		if (auto *next = waiting_.pop()) {
+			owner_.post(next->handle); // The slot passes to it, still taken.
+		} else {
+			slot_taken_ = false;
+		}
+	}
+	// Releases the slot the drive still holds when it ends, however it ends.
+	struct Hold {
+		AsioCompletionDriver &driver;
+		bool holding = false;
+		~Hold() {
+			if (holding) { driver.pass_slot(); }
+		}
+	};
+
+	task::task<void> drive(std::shared_ptr<IOOperation> operation, bool single, task::cancel_token token) {
 		auto lifetime = this->shared_from_this();
 		if (task::current() != owner_) {
 			throw std::logic_error("completion driver requires its owner scheduler");
 		}
-		if (active_ || !operation || operation->in_flight()) {
+		if (!operation || operation->in_flight()) {
 			throw std::logic_error("completion driver is not available");
 		}
-		// The drive takes no cancel token and awaits no operation with one. A request above
-		// it releases interest only: it cannot destroy accepted IO buffers or skip the
-		// remaining durable barriers.
-		active_ = true;
 		auto started = metrics_ ? Clock::now() : Clock::time_point{};
-		struct Reset {
-			bool &active;
-			~Reset() { active = false; }
-		} reset{active_};
+		Hold hold{*this};
 		std::size_t immediate_steps = 0;
 		while (!operation->done()) {
 			// A fast backend still yields bounded owner turns to sockets and timers.
@@ -140,6 +207,13 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 			auto kind = static_cast<std::size_t>(primitive);
 			if (!CompletionStats::supported(primitive)) {
 				throw std::invalid_argument("invalid completion primitive kind");
+			}
+			if (token.requested()) {
+				throw task::cancelled{};
+			}
+			co_await Admit{*this, hold.holding};
+			if (token.requested()) {
+				throw task::cancelled{};
 			}
 			auto submitted = metrics_ ? Clock::now() : Clock::time_point{};
 			if (!queue_->submit(operation)) {
@@ -212,6 +286,7 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 	std::shared_ptr<Queue> queue_;
 	asio::posix::stream_descriptor notification_;
 	asio::steady_timer timer_;
-	bool active_ = false, notification_failed_ = false;
+	Waiting waiting_;
+	bool slot_taken_ = false, notification_failed_ = false;
 };
 } // namespace kronuz::journal
