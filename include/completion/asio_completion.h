@@ -226,7 +226,6 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 			}
 		}
 	}
-#ifndef NDEBUG
 	// One Turn source per driver: turn logs are named by (generation, loop), and strict priority
 	// would starve Bulk under two.
 	struct TurnSource {
@@ -243,7 +242,6 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 		}
 	};
 	bool turn_running_ = false;
-#endif
 	// Releases the slot the drive still holds when it ends, however it ends.
 	struct Hold {
 		AsioCompletionDriver &driver;
@@ -262,9 +260,7 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 			throw std::logic_error("completion driver is not available");
 		}
 		auto started = metrics_ ? Clock::now() : Clock::time_point{};
-#ifndef NDEBUG
 		TurnSource turn{*this, operation->lane() == IOLane::Turn};
-#endif
 		Hold hold{*this};
 		std::size_t immediate_steps = 0;
 		while (!operation->done()) {
