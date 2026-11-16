@@ -130,7 +130,8 @@ void queue_route(c::IO &, c::Operation &operation) {
 	auto stats = queue.stats();
 	const auto at = static_cast<std::size_t>(c::Kind::SyncData) - stats.native_by_primitive.size();
 	check(at < stats.native_extensions.size() && at < stats.fallback_extensions.size(), "SyncData has an extension slot");
-	check(stats.native_extensions[at] + stats.fallback_extensions[at] == 1, "SyncData is counted once");
+	// A submission the native API refuses outright (FreeBSD: EBADF on a closed file) counts as rejected.
+	check(stats.native_extensions[at] + stats.fallback_extensions[at] + stats.native_rejected == 1, "SyncData is counted once");
 }
 
 // A foreign File runs on the worker; sync_data is what runs, not sync.
