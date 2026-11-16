@@ -145,20 +145,22 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 		}
 	};
 	// Awaited before each primitive. A caller holding the slot from its previous primitive keeps
-	// it unless a waiter goes ahead of it; otherwise it hands the slot over and queues.
+	// it unless a waiter goes ahead of it; otherwise it hands the slot over and queues. Waiters
+	// are in two queues by lane, first come first served in each.
 	struct Admit {
 		AsioCompletionDriver &driver;
 		bool &holding;
+		IOLane lane;
 		Waiter waiter{};
 		bool await_ready() noexcept {
-			if (holding) { return !driver.waiter_ahead(); }
+			if (holding) { return !driver.waiter_ahead(lane); }
 			if (driver.slot_taken_) { return false; }
 			driver.slot_taken_ = true;
 			return true;
 		}
 		void await_suspend(std::coroutine_handle<> handle) noexcept {
 			waiter.handle = handle;
-			driver.waiting_.push(&waiter);
+			driver.waiting_[static_cast<std::size_t>(lane)].push(&waiter);
 			if (holding) {
 				holding = false;
 				driver.pass_slot();
@@ -166,12 +168,18 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 		}
 		void await_resume() noexcept { holding = true; }
 		~Admit() {
-			if (waiter.linked) { driver.waiting_.erase(&waiter); }
+			if (waiter.linked) { driver.waiting_[static_cast<std::size_t>(lane)].erase(&waiter); }
 		}
 	};
-	bool waiter_ahead() const noexcept { return waiting_.head != nullptr; }
+	// A Turn waits behind earlier Turns only; a Bulk behind every Turn and every earlier Bulk.
+	bool waiter_ahead(IOLane lane) const noexcept {
+		return waiting_[static_cast<std::size_t>(IOLane::Turn)].head != nullptr ||
+			   (lane == IOLane::Bulk && waiting_[static_cast<std::size_t>(IOLane::Bulk)].head != nullptr);
+	}
 	void pass_slot() {
-		if (auto *next = waiting_.pop()) {
+		auto *next = waiting_[static_cast<std::size_t>(IOLane::Turn)].pop();
+		if (!next) { next = waiting_[static_cast<std::size_t>(IOLane::Bulk)].pop(); }
+		if (next) {
 			owner_.post(next->handle); // The slot passes to it, still taken.
 		} else {
 			slot_taken_ = false;
@@ -211,7 +219,7 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 			if (token.requested()) {
 				throw task::cancelled{};
 			}
-			co_await Admit{*this, hold.holding};
+			co_await Admit{*this, hold.holding, operation->lane()};
 			if (token.requested()) {
 				throw task::cancelled{};
 			}
@@ -286,7 +294,7 @@ class AsioCompletionDriver : public std::enable_shared_from_this<AsioCompletionD
 	std::shared_ptr<Queue> queue_;
 	asio::posix::stream_descriptor notification_;
 	asio::steady_timer timer_;
-	Waiting waiting_;
+	std::array<Waiting, 2> waiting_;  // by IOLane
 	bool slot_taken_ = false, notification_failed_ = false;
 };
 } // namespace kronuz::journal

@@ -150,6 +150,74 @@ void token_while_waiting() {
 	expect(log, {"a:write", "c:write"}, "only the issued primitives ran");
 }
 
+// A Turn's primitive is admitted ahead of every waiting Bulk one, in arrival order within a lane;
+// the primitive in flight is never preempted, and a Turn operation keeps the slot between its own
+// primitives when only Bulk operations wait.
+class Lane final : public j::IOOperation {
+  public:
+	Lane(std::shared_ptr<Steps> inner, j::IOLane lane) : inner_(std::move(inner)), lane_(lane) {}
+	const j::MutationRequest &request() const override { return inner_->request(); }
+	void submitted() override { inner_->submitted(); }
+	bool complete(j::MutationCompletion result) noexcept override { return inner_->complete(std::move(result)); }
+	bool done() const noexcept override { return inner_->done(); }
+	bool in_flight() const noexcept override { return inner_->in_flight(); }
+	j::IO &io() const noexcept override { return inner_->io(); }
+	j::IOLane lane() const noexcept override { return lane_; }
+
+  private:
+	std::shared_ptr<Steps> inner_;
+	j::IOLane lane_;
+};
+
+void turn_lane() {
+	Rig rig;
+	Log log;
+	auto holder = std::make_shared<Steps>("h", log, 1);
+	std::promise<void> gate;
+	auto opened = gate.get_future().share();
+	holder->file()->before_write = [opened] { opened.wait(); };
+	auto op = [&](const char *name, unsigned count, j::IOLane lane) {
+		return std::make_shared<Lane>(std::make_shared<Steps>(name, log, count), lane);
+	};
+	// h holds the slot. Queued behind it, in this order: b1 (Bulk, 2 primitives), t1 (Turn, 2), b2 (Bulk, 1), t2 (Turn, 1).
+	auto b1 = op("b1", 2, j::IOLane::Bulk), t1 = op("t1", 2, j::IOLane::Turn), b2 = op("b2", 1, j::IOLane::Bulk),
+		 t2 = op("t2", 1, j::IOLane::Turn);
+	Result rh, r1, r2, r3, r4;
+	rig.start(rig.ref().run(holder), rh);
+	rig.start(rig.ref().run(b1), r1);
+	rig.start(rig.ref().run(t1), r2);
+	rig.start(rig.ref().run(b2), r3);
+	rig.start(rig.ref().run(t2), r4);
+	asio::post(rig.context, [&] { gate.set_value(); });
+	rig.run();
+	check(rh.finished && r1.finished && r2.finished && r3.finished && r4.finished && !rig.queue->busy(), "all finish");
+	check(!rh.error && !r1.error && !r2.error && !r3.error && !r4.error, "none fails");
+	// h; then the Turns ahead of the Bulks (t1, t2 in arrival order); b1's first primitive was queued before t1's second.
+	expect(log, {"h:write", "t1:write", "t2:write", "t1:sync_data", "b1:write", "b2:write", "b1:sync_data"},
+		   "a Turn's primitives are admitted ahead of waiting Bulk ones, each lane in arrival order");
+}
+
+// A Turn operation's second primitive does not queue behind a waiting Bulk one: the Bulk waits for
+// the whole turn, a write and its SyncData.
+void turn_keeps_the_slot() {
+	Rig rig;
+	Log log;
+	auto holder = std::make_shared<Steps>("h", log, 1);
+	std::promise<void> gate;
+	auto opened = gate.get_future().share();
+	holder->file()->before_write = [opened] { opened.wait(); };
+	auto bulk = std::make_shared<Lane>(std::make_shared<Steps>("b", log, 1), j::IOLane::Bulk);
+	auto turn = std::make_shared<Lane>(std::make_shared<Steps>("t", log, 2), j::IOLane::Turn);
+	Result rh, rb, rt;
+	rig.start(rig.ref().run(holder), rh);
+	rig.start(rig.ref().run(bulk), rb);
+	rig.start(rig.ref().run(turn), rt);
+	asio::post(rig.context, [&] { gate.set_value(); });
+	rig.run();
+	check(rh.finished && rb.finished && rt.finished && !rb.error && !rt.error, "all finish");
+	expect(log, {"h:write", "t:write", "t:sync_data", "b:write"}, "the Turn's two primitives run before the waiting Bulk one");
+}
+
 void token_between_primitives() {
 	Rig rig;
 	Log log;
@@ -186,6 +254,8 @@ int main() {
 		sync_data_fault();
 		shared_slot();
 		token_while_waiting();
+		turn_lane();
+		turn_keeps_the_slot();
 		token_between_primitives();
 	} catch (const std::exception &error) {
 		std::cerr << "failed: " << error.what() << '\n';
