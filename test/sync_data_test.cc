@@ -24,7 +24,8 @@
 // native queue (its worker for a foreign File, its native path for a PosixFile), each succeeding
 // and failing. A failure surfaces with its errno and the token, leaves the written bytes in
 // place, and counts under the extension statistics' SyncData slot. A foreign File records which
-// of sync() and sync_data() ran. Linux also fails the native completion through the ring hook.
+// of sync() and sync_data() ran. Linux also fails the native completion through the ring hook;
+// a Linux host without io_uring fails the test unless COMPLETION_TEST_NO_IO_URING=1 names it.
 #include "completion/api.h"
 #include "completion/native_completion.h"
 #include <cerrno>
@@ -33,6 +34,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <string_view>
 #include <thread>
 
 namespace c = kronuz::io::completion;
@@ -172,7 +174,8 @@ void posix_file(const std::filesystem::path &base, const char *route_name, Route
 	std::shared_ptr<c::File> closed = io.make_closed_file();
 	WriteThenSyncData bad(io, closed, "", c::Kind::SyncData);
 	route(io, bad);
-	check(static_cast<bool>(bad.error) && bad.done() && !bad.in_flight(), ("SyncData on a closed file fails" + at).c_str());
+	check_errno(bad.error, EBADF, ("SyncData on a closed file fails with EBADF" + at).c_str());
+	check(bad.done() && !bad.in_flight(), ("SyncData on a closed file settles" + at).c_str());
 }
 
 #ifdef __linux__
@@ -195,8 +198,13 @@ void native_ring(const std::filesystem::path &base) {
 	hooks.inspect = &inspect_hook;
 	kronuz::journal::LinuxCompletionQueue queue(kronuz::journal::LinuxCompletionPolicy::Automatic, hooks);
 	if (!queue.native_available()) {
-		std::cout << "sync_data: io_uring unavailable (" << queue.setup_error() << "), ring section skipped\n";
-		return;
+		const char *opt_out = std::getenv("COMPLETION_TEST_NO_IO_URING");
+		if (opt_out && std::string_view(opt_out) == "1") {
+			std::cout << "sync_data: io_uring unavailable (" << queue.setup_error() << "), ring section skipped by COMPLETION_TEST_NO_IO_URING=1\n";
+			return;
+		}
+		std::cerr << "sync_data: io_uring unavailable (" << queue.setup_error() << "); set COMPLETION_TEST_NO_IO_URING=1 on a host without it\n";
+		std::exit(1);
 	}
 	for (bool fault : {false, true}) {
 		corrupt_next = false;
