@@ -8,7 +8,7 @@
      HeldCompletion::execute, which runs one primitive its owner chose and loops over nothing.
   2. InlineCompletion::run has no loop of its own: it calls drive_synchronously.
   3. With --base DIR (a checkout of the commit before the seam): every file under test/ that exists there is
-     byte-identical here except the ones listed in CHANGED, and every public header declaration it had remains.
+     byte-identical here except the ones listed in CHANGED.
 """
 import argparse
 import re

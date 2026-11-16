@@ -1,4 +1,4 @@
-> Status: CURRENT (2026-11-15) the seam the coroutine drivers run through: `SyncData`, `completion_ref`, `InlineCompletion`, `HeldCompletion`, and the Asio driver's shared slot.
+> Status: CURRENT (2026-11-16) the seam the coroutine drivers run through: `SyncData`, `completion_ref`, `InlineCompletion`, `HeldCompletion`, and the Asio driver's shared slot.
 
 # The completion seam
 
@@ -37,7 +37,7 @@ class completion_ref {                       // non-owning, like task::scheduler
 
 A driver is any type whose `run(std::shared_ptr<IOOperation>, task::cancel_token)` returns `task::task<void>`; `AsioCompletionDriver`, `InlineCompletion` and `HeldCompletion` are three. The call drives the operation to `done()`. An IO error is the operation's to handle (its `complete` receives the completion with the error); `run` throws only for misuse (an operation already in flight, a driver on the wrong scheduler) and for `task::cancelled`.
 
-**The token is read before each primitive is issued.** Requested, the primitive is not issued and the call throws `task::cancelled`; the operation is left idle and unfinished. A primitive already issued completes into the operation first, so the operation's buffers are never released under the kernel and a durable step is never torn. The caller is released at that boundary, not earlier. A token requested after the last primitive completed does not fail the call. The Asio driver reads it again when a waiting operation reaches the front, so an operation cancelled while it waits for the slot is dropped without being issued.
+**The token is read before each primitive is issued.** Requested, the primitive is not issued and the call throws `task::cancelled`; the operation is left idle and unfinished. A primitive already issued completes into the operation first, so the operation's buffers are never released under the kernel and a durable step is never torn: a caller blocked on its in-flight primitive is released when that primitive completes. A token requested after the last primitive completed does not fail the call. A caller waiting for the Asio driver's slot is released at once: a `cancel_callback` on the token claims its waiter (the slot's hand-over claims it too; the first claim wins) and posts its resume to the owner, where it leaves the queue unissued and throws `task::cancelled`. The callback may run on any thread; the claim is one atomic, and everything else stays on the owner.
 
 ## `InlineCompletion` and `drive_synchronously`
 
@@ -63,3 +63,7 @@ A ticket names one primitive and stays valid while it is held, so a test release
 One loop has one native queue and one `AsioCompletionDriver`, and many groups' tasks share them. The queue has one slot (one original in flight), so `run` now admits any number of operations at once and each *primitive* takes the slot in turn: a primitive holds it from submission to reaping, and at the release the next waiter inherits it by a post to the owner, so the slot is never idle while anyone waits. A multi-step operation re-queues between primitives; two overlapping operations alternate. An uncontended `run` takes the slot without suspending and issues exactly what it did before.
 
 Waiting is in two lanes by `IOOperation::lane()`: `IOLane::Turn` (a turn's write and `SyncData`) is admitted ahead of every waiting `IOLane::Bulk` one (the default: artifact chunks, snapshot IO, everything that existed before), first come first served within a lane. Nothing preempts a primitive in flight, so a Turn waits at most one Bulk primitive. Measured: `docs/MEASUREMENTS.md`, "Turn lane".
+
+One Turn source per driver: at most one `IOLane::Turn` operation runs on a driver at a time, as the design names turn logs by (generation, loop) and one loop has one driver. Debug builds assert it when a second Turn operation starts. Strict priority relies on it: between two turns the slot passes to the Bulk head, so Bulk gets at least one primitive per turn; two Turn sources alternating would starve Bulk.
+
+At teardown, a primitive still in flight when the roots are destroyed stays in the native queue; the host drains the queue (polls it until idle) before destroying it, as `~BsdCompletionQueue` terminates on an undrained queue.

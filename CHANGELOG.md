@@ -26,7 +26,9 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
   `InlineCompletion` runs.
 - `AsioCompletionDriver::run` and `run_one` take an optional token. Operations may now run at once:
   they share the queue's one slot a primitive at a time. `IOOperation::lane()` (default
-  `IOLane::Bulk`) admits a `Turn` operation's primitive ahead of every waiting Bulk one.
+  `IOLane::Bulk`) admits a `Turn` operation's primitive ahead of every waiting Bulk one; one Turn
+  operation runs per driver at a time (asserted in Debug). A token requested while an operation
+  waits for the slot releases its caller at once with `task::cancelled`.
 - `COMPLETION_TASK` (on for a top-level build) builds `completion::task` without Asio;
   `completion::asio` links it. `bench/lane_probe.cc` times a turn's wait behind Bulk writes.
 
