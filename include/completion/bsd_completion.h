@@ -40,7 +40,7 @@ namespace kronuz::journal {
 // One funded primitive and one reserved completion slot. The owning executor
 // submits and polls; the fallback worker performs IO only, never state changes.
 // macOS uses native AIO reads/writes with bounded owner-side completion polling.
-// FreeBSD also uses native aio_fsync and SIGEV_KEVENT notification.
+// FreeBSD also uses native aio_fsync (O_DSYNC for SyncData) and SIGEV_KEVENT notification.
 class BsdCompletionQueue {
   public:
 	BsdCompletionQueue() {
@@ -104,7 +104,7 @@ class BsdCompletionQueue {
 		auto file = std::dynamic_pointer_cast<detail::PosixFile>(request.file);
 		bool native = file && (request.kind == PrimitiveKind::Write || request.kind == PrimitiveKind::Read);
 #ifdef __FreeBSD__
-		native = native || (file && request.kind == PrimitiveKind::Sync);
+		native = native || (file && (request.kind == PrimitiveKind::Sync || request.kind == PrimitiveKind::SyncData));
 #endif
 		if (native) {
 			control_ = {};
@@ -130,7 +130,7 @@ class BsdCompletionQueue {
 			int result;
 			if (request_.kind == PrimitiveKind::Read) { result = ::aio_read(&control_); }
 			else if (request_.kind == PrimitiveKind::Write) { result = ::aio_write(&control_); }
-			else { result = ::aio_fsync(O_SYNC, &control_); }
+			else { result = ::aio_fsync(request_.kind == PrimitiveKind::SyncData ? O_DSYNC : O_SYNC, &control_); }
 			if (result == 0) {
 				native_pending_ = true;
 				++stats_.native_submitted;

@@ -38,7 +38,7 @@ struct MutationToken {
 	bool operator==(const MutationToken &) const = default;
 };
 
-enum class PrimitiveKind { Write, Sync, Create, Replace, DirectorySync, Read, Open, Size, Scan, Next, OpenCandidate, Remove, NextInto, InspectEntry, InspectFile, SharedLease, ExclusiveLease, CloseFile, CloseCursor, OpenInto, OpenCandidateInto, ScanInto, CreateInto, SyncFiles, OrderFiles };
+enum class PrimitiveKind { Write, Sync, Create, Replace, DirectorySync, Read, Open, Size, Scan, Next, OpenCandidate, Remove, NextInto, InspectEntry, InspectFile, SharedLease, ExclusiveLease, CloseFile, CloseCursor, OpenInto, OpenCandidateInto, ScanInto, CreateInto, SyncFiles, OrderFiles, SyncData };
 
 // Views belong to the operation. An accepted driver retains that operation
 // until the original primitive completes, including after cancellation.
@@ -148,6 +148,10 @@ inline MutationCompletion execute_primitive(IO &io, const MutationRequest &reque
 			break;
 		case PrimitiveKind::Sync:
 			request.file->sync();
+			break;
+		case PrimitiveKind::SyncData:
+			if (!request.file) { throw std::invalid_argument("data sync requires a file"); }
+			request.file->sync_data();
 			break;
 		case PrimitiveKind::Create:
 			result.file = io.create_exclusive(request.source);

@@ -37,7 +37,7 @@ void check(bool value) {
 		throw std::runtime_error("Asio extension invariant failed");
 }
 // The primitives one Operation drives: the kinds_ below.
-constexpr unsigned steps = 23;
+constexpr unsigned steps = 24;
 struct State {
 	std::shared_ptr<c::IO> io;
 	std::unique_ptr<j::DirectoryCursor> cursor;
@@ -151,7 +151,7 @@ class Operation final : public c::Operation {
 		c::Kind::Open,	   c::Kind::ExclusiveLease, c::Kind::CloseFile,			c::Kind::CloseCursor,
 		c::Kind::OpenInto, c::Kind::CloseFile,		c::Kind::OpenCandidateInto, c::Kind::CloseFile,
 		c::Kind::ScanInto, c::Kind::NextInto,		c::Kind::CloseCursor,		c::Kind::CreateInto,
-		c::Kind::CloseFile, c::Kind::SyncFiles,		c::Kind::OrderFiles};
+		c::Kind::SyncData, c::Kind::CloseFile,		c::Kind::SyncFiles,			c::Kind::OrderFiles};
 	std::shared_ptr<State> state_;
 	std::optional<c::Kind> single_;
 	c::Request request_;

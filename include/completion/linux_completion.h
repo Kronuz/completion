@@ -276,10 +276,13 @@ class LinuxCompletionQueue {
 			return true;
 		}
 		case PrimitiveKind::Sync:
+		case PrimitiveKind::SyncData:
 			if (!file)
 				return false;
 			entry.opcode = IORING_OP_FSYNC;
 			entry.fd = file->native_handle();
+			if (request.kind == PrimitiveKind::SyncData)
+				entry.fsync_flags = IORING_FSYNC_DATASYNC;
 			return true;
 		case PrimitiveKind::DirectorySync:
 			if (!directory)
