@@ -6,6 +6,35 @@ entries are dated.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#completion) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-15
+
+### Added
+
+- **`SyncData`**, a primitive for `File::sync_data()` (the data and the metadata to read it back, not
+  the timestamps), on every backend: `drive_synchronously`, the worker of either queue, the io_uring
+  ring (`IORING_FSYNC_DATASYNC`), FreeBSD's `aio_fsync(O_DSYNC)` and the Asio driver. The statistics
+  extension arrays grow from 13 to 14 entries, so `completion_extension_count` is 14; the legacy
+  arrays are unchanged. A turn log written in place needs it per commit instead of `Sync`.
+- **The seam** (`completion/seam.h`, target `completion::task`, over `task.hh` alone):
+  `completion_ref`, a non-owning reference to any driver whose
+  `run(std::shared_ptr<IOOperation>, task::cancel_token)` returns `task::task<void>`;
+  `InlineCompletion`, which runs every primitive on the caller's thread; and `HeldCompletion`, which
+  holds each primitive until its owner executes, delivers, fails or drops it, in any order. The token
+  is read before each primitive is issued; an issued primitive completes into its operation first.
+- `drive_synchronously(operation, proceed)`: the one synchronous loop, stopping before a primitive
+  when `proceed()` is false. The one-argument form is unchanged, and is the loop
+  `InlineCompletion` runs.
+- `AsioCompletionDriver::run` and `run_one` take an optional token. Operations may now run at once:
+  they share the queue's one slot a primitive at a time. `IOOperation::lane()` (default
+  `IOLane::Bulk`) admits a `Turn` operation's primitive ahead of every waiting Bulk one.
+- `COMPLETION_TASK` (on for a top-level build) builds `completion::task` without Asio;
+  `completion::asio` links it. `bench/lane_probe.cc` times a turn's wait behind Bulk writes.
+
+### Changed
+
+- `AsioCompletionDriver` no longer refuses a second concurrent `run`. `test/asio_extension_test.cc`
+  gains a `SyncData` step so each of the 14 extension slots is still exercised once.
+
 ## 2026-11-02
 
 ### Changed

@@ -22,7 +22,9 @@ and directory barriers make writes durable. It is the storage layer under
   until the original primitive completes; cancellation cannot fabricate a result or free
   memory the kernel is using.
 - **One state machine, four drivers.** The same primitives run synchronously, on io_uring, on
-  POSIX AIO, or through the `completion::asio` adapter.
+  POSIX AIO, or through the `completion::asio` adapter. `completion_ref` (`completion::task`)
+  is the one handle a coroutine awaits for any of them, plus `InlineCompletion` and a
+  `HeldCompletion` that lets a test hold, reorder and release each primitive.
 - **A hardened directory backend.** `PosixIO` rejects symlinks, hard links, foreign-owned and
   group- or world-writable files, and unsafe names; creation is exclusive. The root must be
   owned and private, unless `PosixIOOptions` admits it and the host warns.

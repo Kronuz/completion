@@ -16,15 +16,17 @@ include/completion/
   native_completion.h   Selects the platform queue.
   linux_completion.h    LinuxCompletionQueue: io_uring.
   bsd_completion.h      BsdCompletionQueue: POSIX AIO (FreeBSD kqueue, macOS polled).
-  asio_completion.h     The optional task::task driver (completion::asio).
+  asio_completion.h     The optional task::task driver (completion::asio): one slot, Turn lane ahead of Bulk.
+  seam.h                completion_ref, InlineCompletion, HeldCompletion (completion::task, task.hh only).
   image.h               ImagePreparation and ImagePublication jobs.
   allocation.h          AllocationContext and OwnedAllocator.
   api.h                 The kronuz::io::completion entry point.
 test/                   One suite per feature (core, allocation, scan, inspection, reuse, map, owner_lock, ...).
-bench/                  The platform probes behind PLATFORM_FINDINGS.md (sync, commit, unlink, directory flush); COMPLETION_BUILD_BENCH.
+bench/                  The platform probes behind PLATFORM_FINDINGS.md (sync, commit, unlink, directory flush); lane_probe.cc and lane_ab.py (docs/MEASUREMENTS.md, "Turn lane"); COMPLETION_BUILD_BENCH.
+tools/check_seam.py     Greps that drive_synchronously is the one synchronous loop (CTest completion_seam_shape).
 tools/mutants.py        The 14 owner-lock mutants of the CL-2 review, applied to a scratch copy and run against the suite.
 examples/demo.cc        Batched durability across two directories.
-docs/                   PLATFORM_FINDINGS.md, MEASUREMENTS.md, mechanisms/, completion.d2 (the README diagram's source).
+docs/                   PLATFORM_FINDINGS.md, MEASUREMENTS.md, mechanisms/ (completion-seam.md: SyncData, the seam, the slot), completion.d2 (the README diagram's source).
 ```
 
 ## Verification and benchmarks
@@ -96,7 +98,8 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j2 && cte
   cancelled.
 - **Every driver runs the same primitive set.** A new primitive gets the
   synchronous path, both native queues, and the Asio adapter, with tests that hold
-  an original in flight and complete it after the facade is gone.
+  an original in flight and complete it after the facade is gone. `HeldCompletion`
+  and `InlineCompletion` run `execute_primitive`, so they take it with the sync path.
 - **Additive by default.** New primitives append ordinals; the twelve legacy
   statistics arrays and existing request and result layouts stay unchanged, and
   new capabilities default to unsupported. Header consumers rebuild together.
