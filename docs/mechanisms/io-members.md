@@ -49,8 +49,8 @@ The mapping outlives its handle and the name, as `map()`'s does.
 Linux's `fsync` and FreeBSD's `kern_fsync` write back pages dirtied through a mapping. On macOS the
 kernel delegates `fsync` to the filesystem: HFS's `hfs_fsync` pushes the cluster layer
 (`cluster_push`), not pages dirtied through a mapping, and APFS's source is closed. `msync(MS_SYNC)`
-writes those pages, and `PosixFile` does not issue it, so whether `File::sync` makes mapped stores
-durable on macOS is open.
+writes those pages, and `PosixFile` does not issue it. So the contract promises visibility to
+readers of the file everywhere and durability after `sync` everywhere but macOS.
 
 ## link
 

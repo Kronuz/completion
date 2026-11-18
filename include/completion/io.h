@@ -118,7 +118,8 @@ public:
 	// A hint; never fails and never changes the bytes. Default: nothing.
 	virtual void advise([[maybe_unused]] std::uint64_t offset, [[maybe_unused]] std::uint64_t length, Advice) noexcept {}
 	// A writable view of [0, length) shared with the file; requires size() >= length. Null when
-	// the backend cannot map. Stores reach the file without a write call; not durable until sync.
+	// the backend cannot map. Stores reach the file without a write call.
+	// Stores are visible to readers of the file; durability needs `sync` and is not promised on macOS.
 	virtual std::shared_ptr<SharedMapping> map_shared([[maybe_unused]] std::uint64_t length) { return nullptr; }
 };
 
