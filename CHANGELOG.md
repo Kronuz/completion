@@ -6,6 +6,22 @@ entries are dated.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#completion) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-17
+
+### Added
+
+- **`IO::sync_data_files(std::span<File* const>)`**, the data-only counterpart of `sync_files`; the
+  default runs `File::sync_data` on each file. Adding a virtual with a default breaks no backend.
+
+### Changed
+
+- The executor's `Sync` and `SyncData` primitives call `IO::sync_files` and `IO::sync_data_files`
+  on the primitive's file instead of `File::sync` and `File::sync_data`, so a host that overrides
+  the IO sees every sync run by `drive_synchronously`, `InlineCompletion`, `HeldCompletion` and either
+  queue's worker. A `Sync` or `SyncData` without a file fails with `std::invalid_argument`. On macOS
+  a `PosixFile`'s `Sync` run by the worker is `sync_files` of one file: an `fsync`, then the
+  `F_FULLFSYNC` it did before.
+
 ## 2026-11-15
 
 ### Added

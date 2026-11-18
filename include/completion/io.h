@@ -234,6 +234,11 @@ public:
 	virtual void sync_files(std::span<File* const> files) {
 		for (auto* file : files) { file->sync(); }
 	}
+	// As sync_files, but data only: File::sync_data on each (the bytes and the metadata to read
+	// them back; timestamps may lag). A backend overriding it may share one flush among them.
+	virtual void sync_data_files(std::span<File* const> files) {
+		for (auto* file : files) { file->sync_data(); }
+	}
 	// Makes every file durable and the directory's entries durable (creations, replacements and
 	// removals so far), as sync_files(files) then sync_directory() would; a backend may share
 	// one device flush among them. After a failure, which are durable is unspecified.

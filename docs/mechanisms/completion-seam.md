@@ -18,11 +18,13 @@ task awaits   completion_ref::run(operation, token)
 
 | Backend | Where it runs |
 |---|---|
-| `drive_synchronously`, `InlineCompletion`, `HeldCompletion` | `detail::execute_primitive` on the calling thread |
+| `drive_synchronously`, `InlineCompletion`, `HeldCompletion` | `detail::execute_primitive` on the calling thread, through `IO::sync_data_files` |
 | Linux queue, a `PosixFile` | the ring: `IORING_OP_FSYNC` with `IORING_FSYNC_DATASYNC` |
 | FreeBSD queue, a `PosixFile` | `aio_fsync(O_DSYNC)`, notified through kqueue |
-| macOS queue; either queue for another `File`, or no ring | the fallback worker, which calls `sync_data` |
+| macOS queue; either queue for another `File`, or no ring | the fallback worker, through `IO::sync_data_files` |
 | `AsioCompletionDriver` | through whichever queue it was built over; counted in its own latency slot |
+
+`IO::sync_data_files(files)` is `sync_files` for data only: its default runs `File::sync_data` on each file in order, and a backend may override it to share one flush. Every executed `Sync` is `IO::sync_files` and every executed `SyncData` is `IO::sync_data_files`, each of the primitive's one file, so a host that overrides the two counts, delays or skips every async sync that reaches the executor (`drive_synchronously`, `InlineCompletion`, `HeldCompletion` and either queue's worker); the ring's and `aio_fsync`'s native path for a `PosixFile` is the real syscall and does not. `completion_seam_shape` greps that `File::sync` and `File::sync_data` are called only from the two IO defaults and `PosixIO`'s foreign-file fallback. `test/sync_seam_test.cc` covers it.
 
 The statistics extension arrays grow from 13 to 14 entries (`SyncData` is index 13), so `completion_extension_count` and the driver's per-kind histograms grow with them. The legacy arrays are untouched.
 

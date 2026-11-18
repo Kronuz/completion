@@ -153,12 +153,13 @@ inline MutationCompletion execute_primitive(IO &io, const MutationRequest &reque
 			result.count = request.file->write_at(request.offset, request.bytes);
 			break;
 		case PrimitiveKind::Sync:
-			request.file->sync();
+		case PrimitiveKind::SyncData: {
+			if (!request.file) { throw std::invalid_argument("sync requires a file"); }
+			File *const files[] = {request.file.get()};
+			if (request.kind == PrimitiveKind::Sync) { io.sync_files(files); }
+			else { io.sync_data_files(files); }
 			break;
-		case PrimitiveKind::SyncData:
-			if (!request.file) { throw std::invalid_argument("data sync requires a file"); }
-			request.file->sync_data();
-			break;
+		}
 		case PrimitiveKind::Create:
 			result.file = io.create_exclusive(request.source);
 			break;

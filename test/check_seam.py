@@ -7,7 +7,9 @@
      calling thread. execute_primitive() is called from it, from the two queues' fallback workers, and from
      HeldCompletion::execute, which runs one primitive its owner chose and loops over nothing.
   2. InlineCompletion::run has no loop of its own: it calls drive_synchronously.
-  3. With --base DIR (a checkout of the commit before the seam): every file under test/ that exists there is
+  3. Every file sync goes through the IO seam: `->sync()` and `->sync_data()` on a File occur only in io.h (the
+     defaults of sync_files and sync_data_files) and posix.h (PosixIO's fallback for a foreign file).
+  4. With --base DIR (a checkout of the commit before the seam): every file under test/ that exists there is
      byte-identical here except the ones listed in CHANGED.
 """
 import argparse
@@ -74,6 +76,14 @@ def main() -> None:
     held = function_body(seam, "class HeldCompletion")
     if "drive_synchronously(" in held:
         fail("HeldCompletion drives synchronously")
+
+    direct = {}
+    for path in sorted(INCLUDE.glob("*.h")):
+        count = len(re.findall(r"(?:->|\.)sync(?:_data)?\(\)", path.read_text()))
+        if count:
+            direct[path.name] = count
+    if direct != {"io.h": 2, "posix.h": 2}:
+        fail(f"File::sync or File::sync_data called outside the seam: {direct}, expected io.h 2 and posix.h 2")
 
     if args.base:
         base = Path(args.base)
