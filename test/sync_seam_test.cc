@@ -23,13 +23,17 @@
 // IO::sync_data_files and the seam: the default runs File::sync_data on each file, in order, and
 // the executor's Sync and SyncData primitives reach the IO's sync_files and sync_data_files (the
 // files themselves are not touched), through drive_synchronously and through the native queue's
-// worker. A counting IO records each call with the files it was given, as a test host does.
+// worker. A counting IO records each call with the files it was given, as a test host does. The
+// same primitives then run over faultlab's faultfs, and power is cut after them: what a sync
+// made durable survives every crash it allows, and what no sync reached is lost.
 #include "completion/api.h"
 #include "completion/native_completion.h"
+#include "faultlab/faultfs.h"
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
 #include <filesystem>
+#include <set>
 #include <iostream>
 #include <string>
 #include <system_error>
@@ -253,6 +257,143 @@ void executor(const char *route_name, Route route) {
 		expect(none, {}, "no seam call without a file" + at);
 	}
 }
+
+namespace ff = kronuz::faultlab;
+
+constexpr std::uint64_t seeds = 64;
+
+// What the file `name` holds after a crash of the model at each seed under `policy`; "-" when the
+// name is gone. A copy takes each crash, so every seed starts from the same pre-crash state.
+std::set<std::string> after_crashes(const ff::filesystem &fs, ff::crash_policy policy, const std::string &name = "log") {
+	std::set<std::string> seen;
+	for (std::uint64_t seed = 0; seed < seeds; ++seed) {
+		auto copy = fs.snapshot();
+		copy.crash(seed, policy);
+		seen.insert(copy.list().empty() ? "-" : std::string(copy.view(name)));
+	}
+	return seen;
+}
+
+// What a sync primitive promises, with power cut after it (faultlab's rules: a sync stages no mapped
+// stores here, nothing folds after the cut, a file keeps its durable and its current bytes). Each
+// case is a model state taken at the cut and crashed at many seeds, whole file contents compared.
+void crash(const char *route_name, Route route) {
+	const std::string at = std::string(" through the ") + route_name;
+	const std::string payload(1500, 'p'); // Three sectors, so a tear would show.
+	const std::string old_bytes(1500, 'o');
+	const ff::crash_policy undo{.names = ff::name_pick::durable, .size = ff::size_pick::durable};
+	const std::set<std::string> none{""};
+	const std::set<std::string> whole{payload};
+
+	// A file whose name is durable, with its bytes written and no sync yet.
+	struct Fixture {
+		ff::filesystem fs;
+		ff::io io{fs};
+		std::shared_ptr<c::File> file;
+		explicit Fixture(const std::string &bytes, bool durable_name = true) {
+			file = io.create_exclusive("log");
+			if (durable_name) { io.sync_directory(); }
+			check(file->write_at(0, bytes) == bytes.size(), "the bytes are written");
+		}
+	};
+
+	for (auto kind : {c::Kind::SyncData, c::Kind::Sync}) {
+		const std::string label = kind == c::Kind::Sync ? "Sync" : "SyncData";
+		Fixture unsynced(payload);
+		check(after_crashes(unsynced.fs, undo) == none, ("with no sync the bytes are lost" + at).c_str());
+		check(after_crashes(unsynced.fs, {}).count(payload) == 1 && after_crashes(unsynced.fs, {}).size() > 1, ("the crash model tears unsynced bytes" + at).c_str());
+
+		Fixture synced(payload);
+		Script script(synced.io, synced.file, {kind});
+		route(script);
+		check(script.done() && !script.error, (label + " completes" + at).c_str());
+		check(after_crashes(synced.fs, {}) == whole, (label + " makes every crash keep the bytes, whole" + at).c_str());
+		check(synced.fs.syncs() == 1, (label + " reaches the device once" + at).c_str());
+
+		// Only the named file, and only its bytes: a second file and the next write are not synced.
+		Fixture first(old_bytes);
+		auto second = first.io.create_exclusive("other");
+		first.io.sync_directory();
+		second->write_at(0, payload);
+		Script both(first.io, first.file, {kind});
+		route(both);
+		first.file->write_at(0, payload);
+		auto lost = after_crashes(first.fs, undo);
+		check(lost == std::set<std::string>{old_bytes}, (label + " is durable for its file at the cut, not for a later write" + at).c_str());
+		check(after_crashes(first.fs, undo, "other") == none, (label + " leaves another file unsynced" + at).c_str());
+
+		// A data sync makes bytes durable, not the file's name: that needs the directory sync.
+		Fixture unnamed(payload, false);
+		Script data(unnamed.io, unnamed.file, {kind});
+		route(data);
+		check(!data.error, (label + " completes on an unnamed file" + at).c_str());
+		auto copy = unnamed.fs.snapshot();
+		copy.crash(1, undo);
+		check(copy.list().empty(), (label + " does not make the name durable" + at).c_str());
+		unnamed.io.sync_directory();
+		check(after_crashes(unnamed.fs, undo) == whole, ("the directory sync names the synced file" + at).c_str());
+
+		// A failed sync settles the operation with the errno, runs no later step, and keeps nothing.
+		Fixture failed(payload);
+		failed.fs.add_fault({.kind = ff::op::sync, .nth = 1, .error = EIO, .keep = true});
+		Script fails(failed.io, failed.file, {kind, c::Kind::Sync});
+		route(fails);
+		check(fails.done() && fails.error, ("a failed sync settles the operation" + at).c_str());
+		try { std::rethrow_exception(fails.error); } catch (const std::system_error &e) {
+			check(e.code() == std::error_code(EIO, std::generic_category()), ("the errno surfaces" + at).c_str());
+		}
+		check(failed.fs.syncs() == 1, ("the step after the failure does not reach the device" + at).c_str());
+		check(after_crashes(failed.fs, undo) == none, ("a failed sync made nothing durable" + at).c_str());
+		Script retry(failed.io, failed.file, {kind});
+		route(retry);
+		check(!retry.error && after_crashes(failed.fs, undo) == none, ("a sync after a failed one does not make the lost bytes durable" + at).c_str());
+
+		// Power cut: before the sync it fails having done nothing; one mutation later, it lands.
+		Fixture cut(payload);
+		cut.fs.power_off_after(0);
+		Script dark(cut.io, cut.file, {kind});
+		route(dark);
+		check(dark.done() && dark.error && cut.fs.powered_off(), (label + " fails with the power off" + at).c_str());
+		check(after_crashes(cut.fs, undo) == none, (label + " with the power off made nothing durable" + at).c_str());
+		Fixture last(payload);
+		last.fs.power_off_after(1);
+		Script lands(last.io, last.file, {kind, kind});
+		route(lands);
+		check(lands.done() && lands.error && last.fs.powered_off(), ("the primitive after the last is refused" + at).c_str());
+		check(after_crashes(last.fs, undo) == whole, ("the sync before the cut is durable" + at).c_str());
+	}
+}
+
+// The batch calls run File::sync_data and File::sync on each file of a faultfs IO: the batch is
+// durable, a file outside it is not, and the first failure stops the batch.
+void crash_batches() {
+	const std::string payload(700, 'b');
+	for (bool data : {true, false}) {
+		ff::filesystem fs;
+		ff::io io(fs);
+		std::vector<std::unique_ptr<c::File>> files;
+		std::vector<c::File *> batch;
+		for (auto name : {"a", "b", "c"}) { files.push_back(io.create_exclusive(name)); }
+		io.sync_directory();
+		for (auto &file : files) { file->write_at(0, payload); }
+		batch = {files[0].get(), files[1].get()};
+		if (data) { io.sync_data_files(batch); } else { io.sync_files(batch); }
+		for (auto [name, want] : {std::pair{"a", payload}, {"b", payload}, {"c", std::string()}}) {
+			auto seen = after_crashes(fs, {.names = ff::name_pick::durable, .size = ff::size_pick::durable}, name);
+			check(seen == std::set<std::string>{want}, "a batch is durable, a file outside it is not");
+		}
+	}
+	ff::filesystem fs;
+	ff::io io(fs);
+	auto a = io.create_exclusive("a"), b = io.create_exclusive("b");
+	io.sync_directory();
+	a->write_at(0, payload);
+	b->write_at(0, payload);
+	fs.add_fault({.kind = ff::op::sync, .nth = 1, .error = EIO});
+	std::vector<c::File *> both{a.get(), b.get()};
+	try { io.sync_data_files(both); check(false, "a failed batch throws"); } catch (const std::system_error &) {}
+	check(fs.syncs() == 1, "the first failure stops the batch");
+}
 } // namespace
 
 int main(int argc, char **argv) {
@@ -264,6 +405,9 @@ int main(int argc, char **argv) {
 	posix(argv[1]);
 	executor("inline loop", inline_route);
 	executor("native queue", queue_route);
+	crash("inline loop", inline_route);
+	crash("native queue", queue_route);
+	crash_batches();
 	std::cout << "sync_seam: ok\n";
 	return 0;
 }

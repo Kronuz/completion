@@ -73,10 +73,15 @@ if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
     endif()
   endif()
   if(BUILD_TESTING)
+    # faultlab's faultfs, the crash model of the sync-seam test. Test-only: faultlab depends on
+    # completion, and the completion target defined above is the one it reuses.
+    FetchContent_Declare(faultlab GIT_REPOSITORY https://github.com/Kronuz/faultlab.git GIT_TAG a452a8c5e79655293d114d77c2ebc54af5fb0505)
+    FetchContent_MakeAvailable(faultlab)
     foreach(t core allocation resource posix_resource scan inspection cursor_close reuse image_close create_into sync_files sync_calls sync_primitives sync_data sync_seam map dir_lock dir_trust owner_lock)
       add_executable(completion_${t}_test test/${t}_test.cc)
       target_link_libraries(completion_${t}_test PRIVATE completion::completion)
     endforeach()
+    target_link_libraries(completion_sync_seam_test PRIVATE faultlab::faultlab)
     # File tests take a state directory; sync_files also models independent device caches.
     foreach(t allocation resource)
       add_test(NAME completion_${t} COMMAND completion_${t}_test)
