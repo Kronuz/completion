@@ -401,13 +401,13 @@ int main(int argc, char **argv) {
 		std::cerr << "usage: completion_sync_seam_test DIRECTORY\n";
 		return 2;
 	}
+	crash("inline loop", inline_route);
+	crash("native queue", queue_route);
+	crash_batches();
 	defaults();
 	posix(argv[1]);
 	executor("inline loop", inline_route);
 	executor("native queue", queue_route);
-	crash("inline loop", inline_route);
-	crash("native queue", queue_route);
-	crash_batches();
 	std::cout << "sync_seam: ok\n";
 	return 0;
 }
