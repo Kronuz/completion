@@ -193,7 +193,7 @@ void defaults() {
 void posix(const std::filesystem::path &base) {
 	auto directory = base / "posix";
 	std::filesystem::remove_all(directory);
-	std::filesystem::create_directory(directory);
+	std::filesystem::create_directories(directory);
 	std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
 	c::PosixIO io(directory);
 	auto file = io.create_exclusive("data");
