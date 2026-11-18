@@ -56,6 +56,11 @@
 #ifdef __APPLE__
 #include <dlfcn.h>
 #endif
+#if defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/acl.h>
+#elif defined(__linux__)
+#include <sys/xattr.h>
+#endif
 
 namespace kronuz::journal {
 
@@ -467,6 +472,44 @@ inline off_t checked_offset(std::uint64_t offset) {
 	}
 	return static_cast<off_t>(offset);
 }
+// Whether the open file carries an ACL beyond its mode bits: macOS any extended entry, FreeBSD a
+// non-trivial NFSv4 or POSIX.1e ACL, Linux a POSIX access ACL. A filesystem without ACLs has none.
+inline bool extended_acl(int fd) {
+#if defined(__APPLE__)
+	acl_t acl = ::acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
+	if (!acl) {
+		if (errno == ENOENT || errno == ENOTSUP || errno == EOPNOTSUPP) { return false; }
+		system_failure("inspect file ACL");
+	}
+	::acl_free(acl);
+	return true;
+#elif defined(__FreeBSD__)
+	acl_t acl = ::acl_get_fd_np(fd, ACL_TYPE_NFS4);
+	if (!acl && (errno == EINVAL || errno == EOPNOTSUPP)) { acl = ::acl_get_fd_np(fd, ACL_TYPE_ACCESS); }
+	if (!acl) {
+		if (errno == EINVAL || errno == EOPNOTSUPP) { return false; }
+		system_failure("inspect file ACL");
+	}
+	int trivial = 0;
+	const int result = ::acl_is_trivial_np(acl, &trivial);
+	const int error = errno;
+	::acl_free(acl);
+	if (result != 0) { errno = error; system_failure("inspect file ACL"); }
+	return trivial == 0;
+#elif defined(__linux__)
+	// The kernel stores an access ACL only when it says more than the mode bits.
+	if (::fgetxattr(fd, "system.posix_acl_access", nullptr, 0) >= 0) { return true; }
+	if (errno == ENODATA || errno == ENOTSUP || errno == EOPNOTSUPP) { return false; }
+	system_failure("inspect file ACL");
+#else
+	(void)fd;
+	return false;
+#endif
+}
+// Errors of a filesystem that cannot reserve space; preallocate then grows the size only.
+inline bool reservation_unsupported(int error) {
+	return error == EOPNOTSUPP || error == ENOTSUP || error == ENOSYS || error == EINVAL;
+}
 class PosixCursor : public DirectoryCursor {
 public:
 	explicit PosixCursor(DIR* directory) : directory_(directory) {}
@@ -540,7 +583,9 @@ public:
 	EntryInspection inspect() override {
 		struct stat status{};
 		if (::fstat(fd_, &status)) { system_failure("inspect held file"); }
-		return inspect_status(status);
+		auto inspection = inspect_status(status);
+		inspection.extended_acl = extended_acl(fd_);
+		return inspection;
 	}
 	bool try_lease(LeaseMode mode) override {
 		if (mode != LeaseMode::Shared && mode != LeaseMode::Exclusive) {
@@ -570,7 +615,107 @@ public:
 		if (length > std::numeric_limits<std::size_t>::max()) { throw std::runtime_error("file too large to map"); }
 		return std::make_shared<PosixMapping>(fd_, static_cast<std::size_t>(length));
 	}
+	// Reserves with fallocate (Linux), F_PREALLOCATE then ftruncate (macOS) or posix_fallocate;
+	// where the filesystem cannot reserve, grows the size as the default does.
+	void preallocate(std::uint64_t offset, std::uint64_t length) override {
+		if (length > std::numeric_limits<std::uint64_t>::max() - offset) {
+			throw std::length_error("preallocation exceeds the file range");
+		}
+		const off_t end = checked_offset(offset + length);
+		if (length && reserve(static_cast<off_t>(offset), static_cast<off_t>(length), end)) { return; }
+		File::preallocate(offset, length);
+	}
+	// posix_fadvise (Linux, FreeBSD); F_RDADVISE and F_RDAHEAD (macOS). Errors are ignored.
+	void advise(std::uint64_t offset, std::uint64_t length, Advice advice) noexcept override {
+		constexpr auto limit = static_cast<std::uint64_t>(std::numeric_limits<off_t>::max());
+		if (fd_ < 0 || length == 0 || offset > limit) { return; }
+		length = std::min(length, limit - offset);
+#if defined(__APPLE__)
+		switch (advice) {
+		case Advice::WillNeed: {
+			radvisory ahead{static_cast<off_t>(offset), static_cast<int>(std::min<std::uint64_t>(length, std::numeric_limits<int>::max()))};
+			(void)::fcntl(fd_, F_RDADVISE, &ahead);
+			break;
+		}
+		case Advice::Normal: case Advice::Sequential: (void)::fcntl(fd_, F_RDAHEAD, 1); break;
+		case Advice::Random: (void)::fcntl(fd_, F_RDAHEAD, 0); break;
+		case Advice::DontNeed: break;
+		}
+#elif defined(__linux__) || defined(__FreeBSD__)
+		int native;
+		switch (advice) {
+		case Advice::Normal: native = POSIX_FADV_NORMAL; break;
+		case Advice::Sequential: native = POSIX_FADV_SEQUENTIAL; break;
+		case Advice::Random: native = POSIX_FADV_RANDOM; break;
+		case Advice::WillNeed: native = POSIX_FADV_WILLNEED; break;
+		case Advice::DontNeed: native = POSIX_FADV_DONTNEED; break;
+		default: return;
+		}
+		(void)::posix_fadvise(fd_, static_cast<off_t>(offset), static_cast<off_t>(length), native);
+#else
+		(void)advice;
+#endif
+	}
+	std::shared_ptr<SharedMapping> map_shared(std::uint64_t length) override {
+		if (length > size()) { throw std::invalid_argument("shared mapping exceeds the file"); }
+		if (length > std::numeric_limits<std::size_t>::max()) { throw std::runtime_error("file too large to map"); }
+		return std::make_shared<PosixSharedMapping>(fd_, static_cast<std::size_t>(length));
+	}
 private:
+	// True when [offset, end) is reserved; false when the filesystem cannot reserve. Other
+	// failures throw, leaving the size as it was.
+	bool reserve(off_t offset, off_t length, off_t end) {
+#if defined(__APPLE__)
+		(void)offset; (void)length;
+		// F_PREALLOCATE reserves past the allocated end and leaves the size, so it reserves the
+		// growth and ftruncate sets the size: contiguous when it can be, else in pieces.
+		const auto current = static_cast<off_t>(size());
+		if (end <= current) { return true; }
+		fstore_t store{F_ALLOCATECONTIG | F_ALLOCATEALL, F_PEOFPOSMODE, 0, end - current, 0};
+		int result;
+		do { result = ::fcntl(fd_, F_PREALLOCATE, &store); } while (result < 0 && errno == EINTR);
+		if (result < 0) {
+			store.fst_flags = F_ALLOCATEALL;
+			do { result = ::fcntl(fd_, F_PREALLOCATE, &store); } while (result < 0 && errno == EINTR);
+		}
+		if (result < 0) {
+			if (reservation_unsupported(errno)) { return false; }
+			system_failure("preallocate journal file");
+		}
+		truncate(static_cast<std::uint64_t>(end));
+		return true;
+#elif defined(__linux__)
+		(void)end;
+		int result;
+		do { result = ::fallocate(fd_, 0, offset, length); } while (result < 0 && errno == EINTR);
+		if (result == 0) { return true; }
+		if (reservation_unsupported(errno)) { return false; }
+		system_failure("preallocate journal file");
+#else
+		(void)end;
+		int error;
+		do { error = ::posix_fallocate(fd_, offset, length); } while (error == EINTR);
+		if (error == 0) { return true; }
+		if (reservation_unsupported(error)) { return false; }
+		errno = error;
+		system_failure("preallocate journal file");
+#endif
+	}
+	// Writable and shared; its pages outlive the descriptor and the name, as PosixMapping's do.
+	class PosixSharedMapping final : public SharedMapping {
+	public:
+		PosixSharedMapping(int fd, std::size_t length) {
+			if (length == 0) { return; }
+			void* at = ::mmap(nullptr, length, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+			if (at == MAP_FAILED) { system_failure("map file shared"); }
+			view(std::span<char>(static_cast<char*>(at), length));
+		}
+		~PosixSharedMapping() override {
+			if (!words().empty()) { ::munmap(words().data(), words().size()); }
+		}
+		PosixSharedMapping(const PosixSharedMapping&) = delete;
+		PosixSharedMapping& operator=(const PosixSharedMapping&) = delete;
+	};
 	// The mapping keeps its pages after the descriptor closes or the file is unlinked.
 	class PosixMapping final : public Mapping {
 	public:
@@ -743,6 +888,11 @@ public:
 	void replace(std::string_view source, std::string_view destination) override {
 		detail::PosixName from(source), to(destination);
 		if (::renameat(directory_, from.c_str(), directory_, to.c_str())) { detail::system_failure("replace journal manifest"); }
+	}
+	// linkat on the directory handle, which never replaces an existing destination.
+	void link(std::string_view source, std::string_view destination) override {
+		detail::PosixName from(source), to(destination);
+		if (::linkat(directory_, from.c_str(), directory_, to.c_str(), 0)) { detail::system_failure("link journal file"); }
 	}
 	void remove(std::string_view name) override {
 		detail::PosixName component(name);

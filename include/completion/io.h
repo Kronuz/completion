@@ -45,6 +45,9 @@ struct EntryInspection {
 	EntryFootprint footprint;
 	std::uint64_t device = 0, inode = 0, owner = 0, links = 0;
 	std::uint32_t permissions = 0;
+	// An ACL beyond the mode bits. File::inspect reports it from the held file; inspect_entry,
+	// which opens nothing, and a backend without ACLs report false.
+	bool extended_acl = false;
 	bool operator==(const EntryInspection&) const = default;
 };
 enum class LeaseMode { Shared, Exclusive };
@@ -69,6 +72,22 @@ protected:
 	std::string_view bytes_;
 };
 
+// A writable view of a file's [0, length), shared with the file: stores reach it without a write
+// call. Valid while the handle lives, even after the file closes or is unlinked.
+class SharedMapping : public Mapping {
+public:
+	std::span<char> words() const noexcept { return words_; }
+protected:
+	void view(std::span<char> words) noexcept {
+		words_ = words;
+		bytes_ = std::string_view(words.data(), words.size());
+	}
+private:
+	std::span<char> words_;
+};
+
+enum class Advice { Normal, Sequential, Random, WillNeed, DontNeed };
+
 // Implementations own a trusted, already-created directory. Names are single
 // components; ownership and file-type checks belong to the implementation.
 class File {
@@ -92,7 +111,22 @@ public:
 	// The whole file, read-only, without copying it; null when the backend cannot map,
 	// so callers read instead. Writes through other handles are not promised to show.
 	virtual std::shared_ptr<const Mapping> map() { return nullptr; }
+	// Grows the file to at least offset + length, zero-filled, reserving the space so later writes
+	// in that range do not fail with ENOSPC. Throws std::system_error (ENOSPC, EIO) on failure.
+	// Default: truncate(max(size(), offset + length)), which grows the size without a reservation.
+	virtual void preallocate(std::uint64_t offset, std::uint64_t length);
+	// A hint; never fails and never changes the bytes. Default: nothing.
+	virtual void advise([[maybe_unused]] std::uint64_t offset, [[maybe_unused]] std::uint64_t length, Advice) noexcept {}
+	// A writable view of [0, length) shared with the file; requires size() >= length. Null when
+	// the backend cannot map. Stores reach the file without a write call; not durable until sync.
+	virtual std::shared_ptr<SharedMapping> map_shared([[maybe_unused]] std::uint64_t length) { return nullptr; }
 };
+
+inline void File::preallocate(std::uint64_t offset, std::uint64_t length) {
+	if (length > ~std::uint64_t{0} - offset) { throw std::length_error("preallocation exceeds the file range"); }
+	const std::uint64_t end = offset + length;
+	if (size() < end) { truncate(end); }
+}
 
 class OwnerLock {
 public:
@@ -215,8 +249,12 @@ public:
 	// order_files_and_directory) and closes, and write_at and truncate fail. Opening it does not
 	// copy the file up on a copy-on-write layer (overlayfs).
 	virtual std::unique_ptr<File> open_existing_read_only(std::string_view name) = 0;
+	// Creates the file with the IO's file mode exactly, so the process umask cannot narrow it.
 	virtual std::unique_ptr<File> create_exclusive(std::string_view name) = 0;
 	virtual void replace(std::string_view source, std::string_view destination) = 0;
+	// IO: a second name for source's file. Never replaces: throws std::system_error(EEXIST) when
+	// destination exists. Default: throws not_supported, as the other optional members do.
+	virtual void link(std::string_view source, std::string_view destination);
 	// Missing files are an idempotent success.
 	virtual void remove(std::string_view name) = 0;
 	virtual std::unique_ptr<DirectoryCursor> scan_directory() { throw std::logic_error("directory scanning unsupported"); }
@@ -261,5 +299,9 @@ protected:
 		throw std::system_error(std::make_error_code(std::errc::not_supported), "owner lock options unsupported by this IO");
 	}
 };
+
+inline void IO::link(std::string_view, std::string_view) {
+	throw std::system_error(std::make_error_code(std::errc::not_supported), "link unsupported by this IO");
+}
 
 } // namespace kronuz::journal
