@@ -116,7 +116,11 @@ int main(int argc, char **argv) {
 		auto first = std::shared_ptr<c::File>(io->create_exclusive("anchor"));
 		check(first->write_at(0, "proof") == 5);
 		auto named = io->inspect_entry("anchor");
-		check(named && first->inspect() == *named && named->footprint.logical_bytes == 5 &&
+		check(named.has_value());
+		// inspect_entry opens nothing, so it reports no ACL where the held file may carry one.
+		auto held = first->inspect();
+		held.extended_acl = named->extended_acl;
+		check(held == *named && named->footprint.logical_bytes == 5 &&
 			  named->links == 1 && named->owner == ::geteuid() && named->permissions == 0600 &&
 			  named->footprint.kind == c::EntryKind::Regular);
 		check(!io->inspect_entry("absent"));

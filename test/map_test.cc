@@ -159,6 +159,18 @@ void preallocation(j::PosixIO &io) {
 	file->preallocate(length, 4096);
 	check(file->size() == length + 4096, "preallocate past the end grows again");
 	check(file->write_at(length + 4000, std::string(96, 'z')) == 96, "a write in the preallocated range");
+	// A sparse file: the holes below the size are reserved too.
+	auto sparse = io.create_exclusive("sparse");
+	sparse->truncate(length);
+	check(sparse->write_at(length / 2, "mid") == 3, "write inside the sparse file");
+	sparse->preallocate(0, 2 * length);
+	check(sparse->size() == 2 * length, "preallocate grows the sparse file");
+	std::string middle(3, '?'), zero(4, '?');
+	check(sparse->read_at(length / 2, middle) == 3 && middle == "mid", "filling the holes keeps the data");
+	check(sparse->read_at(4096, zero) == 4 && zero == std::string(4, '\0'), "a filled hole reads zeros");
+	if (reserving) {
+		check(sparse->inspect().footprint.allocated_bytes.value_or(0) >= 2 * length, "preallocate reserves the holes below the size");
+	}
 }
 
 // Pages of the mapping in memory.

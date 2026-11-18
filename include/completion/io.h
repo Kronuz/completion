@@ -46,7 +46,8 @@ struct EntryInspection {
 	std::uint64_t device = 0, inode = 0, owner = 0, links = 0;
 	std::uint32_t permissions = 0;
 	// An ACL beyond the mode bits. File::inspect reports it from the held file; inspect_entry,
-	// which opens nothing, and a backend without ACLs report false.
+	// which opens nothing, and a backend without ACLs report false. So a held and a named
+	// inspection of one file can differ here: identify a file by device and inode.
 	bool extended_acl = false;
 	bool operator==(const EntryInspection&) const = default;
 };
@@ -120,6 +121,7 @@ public:
 	// A writable view of [0, length) shared with the file; requires size() >= length. Null when
 	// the backend cannot map. Stores reach the file without a write call.
 	// Stores are visible to readers of the file; durability needs `sync` and is not promised on macOS.
+	// Truncating the file below a live mapping makes access to the cut pages fault.
 	virtual std::shared_ptr<SharedMapping> map_shared([[maybe_unused]] std::uint64_t length) { return nullptr; }
 };
 
@@ -250,7 +252,8 @@ public:
 	// order_files_and_directory) and closes, and write_at and truncate fail. Opening it does not
 	// copy the file up on a copy-on-write layer (overlayfs).
 	virtual std::unique_ptr<File> open_existing_read_only(std::string_view name) = 0;
-	// Creates the file with the IO's file mode exactly, so the process umask cannot narrow it.
+	// Creates the file with the IO's file mode exactly (an owner lock file stays 0600), so the
+	// process umask cannot narrow it.
 	virtual std::unique_ptr<File> create_exclusive(std::string_view name) = 0;
 	virtual void replace(std::string_view source, std::string_view destination) = 0;
 	// IO: a second name for source's file. Never replaces: throws std::system_error(EEXIST) when

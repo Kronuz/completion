@@ -473,37 +473,31 @@ inline off_t checked_offset(std::uint64_t offset) {
 	return static_cast<off_t>(offset);
 }
 // Whether the open file carries an ACL beyond its mode bits: macOS any extended entry, FreeBSD a
-// non-trivial NFSv4 or POSIX.1e ACL, Linux a POSIX access ACL. A filesystem without ACLs has none.
+// non-trivial NFSv4 or POSIX.1e ACL, Linux a POSIX access ACL. As Detent's mode_only_acl, an ACL
+// that cannot be read counts as one, except where the filesystem says it has none.
 inline bool extended_acl(int fd) {
 #if defined(__APPLE__)
 	acl_t acl = ::acl_get_fd_np(fd, ACL_TYPE_EXTENDED);
-	if (!acl) {
-		if (errno == ENOENT || errno == ENOTSUP || errno == EOPNOTSUPP) { return false; }
-		system_failure("inspect file ACL");
-	}
+	if (!acl) { return errno != ENOENT; }  // ENOENT: no extended ACL
 	::acl_free(acl);
 	return true;
 #elif defined(__FreeBSD__)
 	acl_t acl = ::acl_get_fd_np(fd, ACL_TYPE_NFS4);
 	if (!acl && (errno == EINVAL || errno == EOPNOTSUPP)) { acl = ::acl_get_fd_np(fd, ACL_TYPE_ACCESS); }
 	if (!acl) {
-		if (errno == EINVAL || errno == EOPNOTSUPP) { return false; }
-		system_failure("inspect file ACL");
+		return !(errno == EOPNOTSUPP && ::fpathconf(fd, _PC_ACL_EXTENDED) == 0 && ::fpathconf(fd, _PC_ACL_NFS4) == 0);
 	}
 	int trivial = 0;
-	const int result = ::acl_is_trivial_np(acl, &trivial);
-	const int error = errno;
-	::acl_free(acl);
-	if (result != 0) { errno = error; system_failure("inspect file ACL"); }
-	return trivial == 0;
+	const bool inspected = ::acl_is_trivial_np(acl, &trivial) == 0;
+	const bool freed = ::acl_free(acl) == 0;
+	return !(inspected && trivial == 1 && freed);
 #elif defined(__linux__)
 	// The kernel stores an access ACL only when it says more than the mode bits.
 	if (::fgetxattr(fd, "system.posix_acl_access", nullptr, 0) >= 0) { return true; }
-	if (errno == ENODATA || errno == ENOTSUP || errno == EOPNOTSUPP) { return false; }
-	system_failure("inspect file ACL");
+	return errno != ENODATA && errno != ENOTSUP && errno != EOPNOTSUPP;
 #else
 	(void)fd;
-	return false;
+	return true;
 #endif
 }
 // Errors of a filesystem that cannot reserve space; preallocate then grows the size only.
@@ -663,13 +657,15 @@ public:
 	}
 private:
 	// True when [offset, end) is reserved; false when the filesystem cannot reserve. Other
-	// failures throw, leaving the size as it was.
+	// failures throw.
 	bool reserve(off_t offset, off_t length, off_t end) {
 #if defined(__APPLE__)
-		(void)offset; (void)length;
-		// F_PREALLOCATE reserves past the allocated end and leaves the size, so it reserves the
-		// growth and ftruncate sets the size: contiguous when it can be, else in pieces.
+		(void)length;
+		// F_PREALLOCATE reserves past the allocated end and leaves the size, so holes below the
+		// size get zeros, then it reserves the growth and ftruncate sets the size: contiguous
+		// when it can be, else in pieces.
 		const auto current = static_cast<off_t>(size());
+		fill_holes(offset, std::min(end, current));
 		if (end <= current) { return true; }
 		fstore_t store{F_ALLOCATECONTIG | F_ALLOCATEALL, F_PEOFPOSMODE, 0, end - current, 0};
 		int result;
@@ -685,6 +681,7 @@ private:
 		truncate(static_cast<std::uint64_t>(end));
 		return true;
 #elif defined(__linux__)
+		// fallocate and posix_fallocate allocate every unallocated block in the range, holes included.
 		(void)end;
 		int result;
 		do { result = ::fallocate(fd_, 0, offset, length); } while (result < 0 && errno == EINTR);
@@ -701,6 +698,35 @@ private:
 		system_failure("preallocate journal file");
 #endif
 	}
+#if defined(__APPLE__)
+	// Writes zeros into each hole of [from, to), found with SEEK_HOLE and SEEK_DATA, so the range
+	// gets its blocks and still reads zeros there. A filesystem that cannot seek holes has none.
+	void fill_holes(off_t from, off_t to) {
+		static constexpr char zeros[65536] = {};
+		while (from < to) {
+			off_t hole = ::lseek(fd_, from, SEEK_HOLE);
+			if (hole < 0) {
+				if (errno == ENXIO || errno == EINVAL || errno == ENOTTY || errno == ENOTSUP) { return; }
+				system_failure("find journal file hole");
+			}
+			if (hole >= to) { return; }
+			off_t data = ::lseek(fd_, hole, SEEK_DATA);
+			if (data < 0) {
+				if (errno != ENXIO) { system_failure("find journal file data"); }
+				data = to;
+			}
+			data = std::min(data, to);
+			while (hole < data) {
+				const auto count = static_cast<std::size_t>(std::min<off_t>(data - hole, sizeof zeros));
+				ssize_t written;
+				do { written = ::pwrite(fd_, zeros, count, hole); } while (written < 0 && errno == EINTR);
+				if (written < 0) { system_failure("fill journal file hole"); }
+				hole += written;
+			}
+			from = data;
+		}
+	}
+#endif
 	// Writable and shared; its pages outlive the descriptor and the name, as PosixMapping's do.
 	class PosixSharedMapping final : public SharedMapping {
 	public:

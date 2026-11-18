@@ -10,6 +10,7 @@ name=$1
 build=${2:-build-mutant}
 case $name in
 preallocate) old='if (length && reserve(' new='if (false && reserve(' ;;
+holes) old='fill_holes(offset, std::min(end, current));' new='' ;;
 advise) old='if (fd_ < 0 || length == 0 || offset > limit) { return; }' new='return;' ;;
 map_shared) old='PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)' new='PROT_READ | PROT_WRITE, MAP_PRIVATE, fd, 0)' ;;
 link) old='::linkat(directory_, from.c_str(), directory_, to.c_str(), 0)' new='::renameat(directory_, from.c_str(), directory_, to.c_str())' ;;

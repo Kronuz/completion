@@ -11,11 +11,16 @@ and `PosixIO` implement them on each platform, and what `test/map_test.cc` obser
 | Platform | Call | Notes |
 |---|---|---|
 | Linux | `fallocate(fd, 0, offset, length)` | Reserves the whole range, holes included, and grows the size. |
-| macOS | `F_PREALLOCATE` then `ftruncate` | Reserves only the growth past the current size. |
-| FreeBSD and others | `posix_fallocate` | Returns its error instead of setting `errno`. |
+| macOS | zeros into holes, `F_PREALLOCATE`, then `ftruncate` | Fills the holes below the size, then reserves the growth. |
+| FreeBSD and others | `posix_fallocate` | Allocates the whole range, holes included; returns its error instead of setting `errno`. |
 
 `F_PREALLOCATE` with `F_PEOFPOSMODE` counts from the file's *allocated* end and never moves the
-size, so `PosixFile` asks for `end - size()` and then sets the size with `ftruncate`. `F_VOLPOSMODE`
+size, so `PosixFile` asks for `end - size()` and then sets the size with `ftruncate`. It cannot
+reserve a hole below the size, so first `PosixFile` walks `[offset, min(end, size()))` with
+`SEEK_HOLE` and `SEEK_DATA` and writes zeros into each hole only: the cost is the unallocated
+bytes, and the range still reads zeros there. A filesystem that cannot seek holes (HFS+ keeps no
+sparse files) has none to fill. Linux's `fallocate` and `posix_fallocate` allocate every
+unallocated block in the range already, holes included. `F_VOLPOSMODE`
 takes a volume position, not a file offset, so it cannot reserve a range inside the file. The call
 asks for `F_ALLOCATECONTIG | F_ALLOCATEALL` first and falls back to `F_ALLOCATEALL`. On APFS,
 `F_ALLOCATECONTIG` alone returned success with 0.6 MiB of an 8 MiB request reserved
@@ -24,8 +29,11 @@ the range. With `F_ALLOCATEALL` the request is all-or-nothing.
 
 Where the filesystem cannot reserve (`EOPNOTSUPP`, `ENOTSUP`, `ENOSYS`, `EINVAL`; FreeBSD ZFS returns
 `EINVAL`), the override calls `File::preallocate`, the default, which grows the size without a
-reservation. `ENOSPC`, `EIO` and every other error throw. The test reads `allocated_bytes` as the
-reservation: it must cover the range wherever a raw reservation call on a probe file succeeds.
+reservation. `ENOSPC`, `EIO` and every other error throw. On macOS a failed reservation leaves the
+size as it was; elsewhere a failed `fallocate` may have grown it. The test reads `allocated_bytes` as the
+reservation: it must cover the range wherever a raw reservation call on a probe file succeeds,
+including a sparse file preallocated over its holes. On a full APFS volume the review's probe saw
+`allocated_bytes` predict the ENOSPC outcome.
 
 ## advise
 
@@ -68,9 +76,18 @@ a publisher links, then removes the temporary name.
 - Linux: the `system.posix_acl_access` attribute exists; the kernel removes it when an ACL says no
   more than the mode bits. Detent's `mode_only_acl` accepts every Linux file; this reports the ACL.
 
-A filesystem without ACLs reports false. `IO::inspect_entry` opens nothing and reports false.
+As Detent's `mode_only_acl`, an ACL that cannot be read counts as one, except where the
+filesystem says it keeps none: macOS `ENOENT`; FreeBSD `EOPNOTSUPP` with `_PC_ACL_EXTENDED` and
+`_PC_ACL_NFS4` both 0; Linux `ENODATA`, `ENOTSUP` or `EOPNOTSUPP`. Other platforms report true.
+`IO::inspect_entry` opens nothing and reports false, so a held and a named inspection can differ
+there: identify a file by device and inode.
 
 ## Creation mode
 
 `create_exclusive` and `create_exclusive_into` `fchmod` the new file to the IO's artifact mode
 (`owner.lock` to 0600) before validating it, so the process umask cannot narrow it.
+
+## Shared mapping and truncation
+
+Truncating a file below a live `SharedMapping` makes access to the cut pages fault (`SIGBUS` on
+`PosixFile`); faultfs aborts there instead.
