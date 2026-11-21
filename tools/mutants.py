@@ -34,6 +34,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 POSIX = "include/completion/posix.h"
+POSIX_SYNC = "include/completion/posix_sync.h"
 IO = "include/completion/io.h"
 OPERATION = "include/completion/operation.h"
 IMAGE = "include/completion/image.h"
@@ -129,11 +130,11 @@ MUTANTS = [
     Mutant("m14", "owner_fd_ not recorded", POSIX, '\t\t\towner_fd_.store(owner->fd());', '',
            expect={"Darwin": "killed", "default": "survived"},
            why="only the macOS directory sync reads owner_fd_ (it flushes through the owner file)"),
-    Mutant("s1", "no device flush after the staged fsyncs", POSIX,
+    Mutant("s1", "no device flush after the staged fsyncs", POSIX_SYNC,
            '\t\t\tdo { result = calls.full_sync(devices[i].fd); } while (result < 0 && errno == EINTR);',
            '\t\t\tdo { result = 0; } while (result < 0 && errno == EINTR);',
            why="the group's one device flush is missing; sync_files_test models the device caches on every platform, sync_primitives_test records the macOS sequence"),
-    Mutant("s2", "no ordering barrier", POSIX,
+    Mutant("s2", "no ordering barrier", POSIX_SYNC,
            '\t\t\tdo { result = calls.barrier(devices[i].fd); } while (result < 0 && errno == EINTR);',
            '\t\t\tdo { result = 0; } while (result < 0 && errno == EINTR);',
            why="the group's one ordering barrier is missing; sync_files_test models it on every platform, sync_primitives_test records the macOS sequence"),
@@ -150,7 +151,7 @@ MUTANTS = [
            '\t\tdo { result = sync_calls_.sync(directory_); } while (result < 0 && errno == EINTR);',
            '\t\tresult = 0;',
            why="a group of no files syncs nothing"),
-    Mutant("s6", "files_sync skips the first-pass fsync", POSIX,
+    Mutant("s6", "files_sync skips the first-pass fsync", POSIX_SYNC,
            lines('\t\tdo { result = calls.sync(fd); } while (result < 0 && errno == EINTR);',
                  '\t\tif (result < 0) { system_failure("durably sync journal file"); }'),
            lines('\t\tresult = 0;',
