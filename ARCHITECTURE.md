@@ -32,14 +32,14 @@ build/completion_demo /path/to/first-private-directory /path/to/second-private-d
 | Call site | macOS `full` | macOS `plain` | Linux, both modes | FreeBSD, both modes |
 |---|---|---|---|---|
 | `File::sync` | `F_FULLFSYNC` | `fsync` | `fsync` | `fsync` |
-| `File::sync_data` (`SyncData`, the turn barrier) | `F_FULLFSYNC` | `fsync` | `fdatasync` | `fsync` |
+| `File::sync_data` (`SyncData`, the turn barrier) | `F_FULLFSYNC` | `fsync` | `fdatasync` | `fsync`; AIO's native `SyncData`: `aio_fsync(O_DSYNC)` |
 | `sync_files` | `fsync` each, `F_FULLFSYNC` per device | `fsync` each | writeback hints, `fsync` each | `fsync` each |
 | `sync_files_and_directory` | `fsync` each and the directory, `F_FULLFSYNC` per device | `fsync` each and the directory | `sync_files`, `fsync` the directory | `sync_files`, `fsync` the directory |
-| `order_files_and_directory` | as `sync_files_and_directory` | `fsync` each and the directory, `F_BARRIERFSYNC` on the directory's device | as `sync_files_and_directory` | as `sync_files_and_directory` |
+| `order_files_and_directory` | as `sync_files_and_directory` | `fsync` each and the directory, `F_BARRIERFSYNC` on the directory's device (`F_FULLFSYNC` where the filesystem lacks the barrier) | as `sync_files_and_directory` | as `sync_files_and_directory` |
 | `sync_directory` | `fsync`, `F_FULLFSYNC` through `owner.lock` or the directory | `fsync` | `fsync` | `fsync` |
 | creating `owner.lock` | `F_FULLFSYNC` | `fsync` | `fsync` | `fsync` |
 
-Linux's io_uring and FreeBSD's AIO issue their own `fsync` and `fdatasync` for `Sync`, `SyncData` and `DirectorySync`, the same in both modes. What survives a power loss on macOS: in full mode, everything a returned call covered; in plain mode, nothing is promised, because `fsync` leaves data in the drive's cache, which may lose it or write it out of order, and `F_BARRIERFSYNC` orders only on Apple SSDs. Plain mode survives an application or kernel crash, as Xapiand's write-ahead log does on macOS. Full mode never degrades: an `F_FULLFSYNC` that fails, `ENOTSUP` and `ENOTTY` included, fails the call with its errno and is never replaced by `fsync`.
+Linux's io_uring issues its own `fsync` and `fdatasync` for `Sync`, `SyncData` and `DirectorySync`; FreeBSD's AIO issues `aio_fsync(O_SYNC)` for `Sync` and `aio_fsync(O_DSYNC)` for `SyncData`, and its `DirectorySync` runs `PosixIO::sync_directory`; both are the same in both modes. A file keeps the mode of the backend that opened it: in another backend's batch, a file the batch would sync with less (`batch_weakens`: macOS, a `full` file in a `plain` batch) syncs itself first, and a `plain` file in a `full` batch shares its full flush. What survives a power loss on macOS: in full mode, everything a returned call covered; in plain mode, nothing is promised, because `fsync` leaves data in the drive's cache, which may lose it or write it out of order, and `F_BARRIERFSYNC` orders only on Apple SSDs. Plain mode survives an application or kernel crash, as Xapiand's write-ahead log does on macOS. Full mode never degrades: an `F_FULLFSYNC` that fails, `ENOTSUP` and `ENOTTY` included, fails the call with its errno and is never replaced by `fsync`.
 
 ## Mapping whole files
 

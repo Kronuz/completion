@@ -20,8 +20,9 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
 - On macOS every sync follows the mode. `full`: `F_FULLFSYNC` for `File::sync`, `File::sync_data`,
   the creation of `owner.lock`, each device of a batch and `sync_directory`, and for
   `order_files_and_directory` (what `full_flush_ordering` did). `plain`: `fsync` for all of those
-  and one `F_BARRIERFSYNC` per ordering point; nothing it returns is promised to survive a power
-  loss. Before, durable syncs were always `F_FULLFSYNC` and ordering points `F_BARRIERFSYNC`,
+  and one `F_BARRIERFSYNC` per ordering point, or `F_FULLFSYNC` where the filesystem lacks the
+  barrier (the ordering call fails where that is unsupported too); nothing it returns is promised
+  to survive a power loss. Before, durable syncs were always `F_FULLFSYNC` and ordering points `F_BARRIERFSYNC`,
   a sequence neither mode issues now. Linux and FreeBSD make the same calls as before in both
   modes. Full mode never falls back to `fsync`: a failed `F_FULLFSYNC` fails the call.
 - **`sync_call(SyncSite, FlushMode, SyncPlatform)`** (added, `posix_sync.h`) is the one table from a
@@ -29,7 +30,17 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
   `full_fsync`, `barrier_fsync`); every sync PosixIO makes is the call it names.
 - `PosixIO::replace_sync_calls` covers `File::sync`, `File::sync_data` and the owner lock file,
   through the files opened after it is set; on Linux it takes `fdatasync` too:
-  `replace_sync_calls(fsync, fdatasync, writeback)`.
+  `replace_sync_calls(fsync, fdatasync, writeback)`. It is no longer `noexcept`: a process holds
+  255 distinct seams, and one more throws `std::length_error`.
+- `FlushMode::Value` has no zero (`plain = 1`, `full = 2`): a `FlushMode` built from any other
+  value, a value-initialized `Value` included, throws `std::invalid_argument`, and so does a
+  `PosixIO` whose options' bytes hold one.
+- A batch never weakens a file: a `full` file in a `plain` backend's `sync_files`,
+  `sync_files_and_directory`, `order_files_and_directory` or `Sync` primitive syncs itself
+  (`F_FULLFSYNC` on macOS) before the batch, as another backend's file does (`batch_weakens`,
+  added). A `plain` file in a `full` batch shares the batch's full flush.
+- `detail::PosixFile` is 16 bytes on 64-bit targets again (48 with the per-file seam copy): a file
+  keeps its mode and a one-byte index into a process-wide table of seams.
 
 ## 2026-11-17
 

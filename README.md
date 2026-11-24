@@ -77,7 +77,7 @@ not compile. Every sync the backend and its files issue follows it: `File::sync`
 
 | Platform | `full` | `plain` |
 |---|---|---|
-| macOS | `F_FULLFSYNC` for every durable sync and ordering point (a batch: `fsync` each, then one per device) | `fsync` for durable syncs; one `F_BARRIERFSYNC` per ordering point |
+| macOS | `F_FULLFSYNC` for every durable sync and ordering point (a batch: `fsync` each, then one per device) | `fsync` for durable syncs; one `F_BARRIERFSYNC` per ordering point, or `F_FULLFSYNC` where the filesystem lacks the barrier (the call fails where that is unsupported too) |
 | Linux | `fsync`; `fdatasync` for `sync_data`; writeback hints before a batch | the same calls |
 | FreeBSD | `fsync` | the same calls |
 
@@ -85,7 +85,10 @@ On macOS, `fsync` hands the data to the drive and leaves it in the drive's cache
 drop it, or write it out of order, even after the call returned. Only `F_FULLFSYNC` survives power
 loss there, so `plain` survives an application or kernel crash, not a power loss. `F_BARRIERFSYNC` orders without flushing, and Apple guarantees the order only on Apple SSDs.
 `plain` matches Xapiand's write-ahead log on macOS. In `full` mode an unsupported or failing
-`F_FULLFSYNC` fails the call; it never falls back to `fsync`.
+`F_FULLFSYNC` fails the call; it never falls back to `fsync`. A file keeps the mode of the backend
+that opened it: in another backend's batch, a `full` file the batch would sync with less flushes
+itself first. `FlushMode::Value` has no zero, and a value other than `plain` or `full` is refused
+with `std::invalid_argument`.
 
 ## 📦 Installation
 

@@ -16,7 +16,7 @@ builds on and compiles alone.
 |---|---|
 | `posix.h` | `PosixIOOptions`, `PosixIO` (owner locks, opens, scans, renames, the sync entry points and their test seams) and `make_posix_io` |
 | `posix_support.h` | the `detail` helpers every piece shares: `ManagedPosixControl`, `next_posix_instance`, `system_failure`, `validate_name` and `PosixName`, `validate_file`, `inspect_status` |
-| `posix_sync.h` | `FlushMode`, `SyncSite`, `SyncCall` and `sync_call`, the one table from a flush mode and a sync site to the call; the sync system calls a test replaces (`SyncCalls`), `file_sync`, `SyncMode`, `files_sync_devices`, `files_sync` |
+| `posix_sync.h` | `FlushMode`, `SyncSite`, `SyncCall` and `sync_call`, the one table from a flush mode and a sync site to the call; `batch_weakens`; the sync system calls a test replaces (`SyncSeam`, interned in `sync_seams`) and a file's mode and seam (`SyncCalls`, two bytes), `file_sync`, `SyncMode`, `files_sync_devices`, `files_sync` |
 | `posix_volume.h` | the filesystem class (`linux_filesystem`, `mount_filesystem`, `classify_filesystem`, the `statfs` platform macros) and the barrier warning's types and macOS storage probe (`BarrierStorage`, `BarrierWarning`, `BarrierWarningCall`, `AppleRegistry`, `barrier_storage`, `barrier_volumes`) |
 | `posix_file.h` | `PosixCursor` and `PosixFile` with its mappings, and their helpers `checked_offset`, `extended_acl`, `reservation_unsupported` |
 
