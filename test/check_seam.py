@@ -82,8 +82,10 @@ def main() -> None:
         count = len(re.findall(r"(?:->|\.)sync(?:_data)?\(\)", path.read_text()))
         if count:
             direct[path.name] = count
-    if direct != {"io.h": 2, "posix.h": 2}:
-        fail(f"File::sync or File::sync_data called outside the seam: {direct}, expected io.h 2 and posix.h 2")
+    # io.h: the default sync_files and sync_data_files; posix.h: batch_fds, the one place a PosixIO
+    # batch lets a file sync itself (another backend's file, or one the batch would weaken).
+    if direct != {"io.h": 2, "posix.h": 1}:
+        fail(f"File::sync or File::sync_data called outside the seam: {direct}, expected io.h 2 and posix.h 1")
 
     if args.base:
         base = Path(args.base)
