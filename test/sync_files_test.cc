@@ -131,7 +131,7 @@ void device_barriers() {
 	}
 }
 // The directory's fd (index 3 below) joins the batch: staged with the files, flushed with the
-// device it shares. Ordered mode barriers that device and still flushes the others in full.
+// device it shares. Ordered, plain mode barriers that device; full mode flushes every device.
 void directory_batches() {
 	const std::array<int, 3> fds{0, 1, 2};
 	using j::detail::SyncMode;
@@ -144,23 +144,22 @@ void directory_batches() {
 	SyncModel foreign_directory({9, 9, 9, 5});
 	j::detail::files_sync_devices(fds, 3, 3, SyncMode::durable, foreign_directory);
 	check(foreign_directory.durable() && foreign_directory.full_syncs == 2, "a directory on its own device is flushed");
-	SyncModel ordered({9, 9, 9, 9});
+	constexpr auto plain = j::FlushMode::plain;
+	SyncModel ordered({9, 9, 9, 9}, plain);
 	j::detail::files_sync_devices(fds, 3, 3, SyncMode::ordered, ordered);
 	check(ordered.ordered() && ordered.syncs == 4 && ordered.barriers == 1 && ordered.full_syncs == 0 && !ordered.durable(),
 		"an ordered batch on the directory's device is one barrier and no full flush");
 	SyncModel mixed({9, 3, 9, 9});
 	j::detail::files_sync_devices(fds, 3, 3, SyncMode::ordered, mixed);
-	check(mixed.barriers == 1 && mixed.full_syncs == 1, "ordering never relies on a barrier for another device");
-	check(mixed.is_ordered(0) && mixed.is_ordered(2) && mixed.is_ordered(3) && !mixed.is_ordered(1) && mixed.is_durable(1) && !mixed.is_durable(0),
-		"the directory's device is ordered and the other device is durable");
-	SyncModel only_directory({9});
+	check(mixed.barriers == 0 && mixed.full_syncs == 2 && mixed.durable(), "full mode orders every device with its full flush");
+	SyncModel only_directory({9}, plain);
 	j::detail::files_sync_devices({}, 0, 0, SyncMode::ordered, only_directory);
 	check(only_directory.syncs == 1 && only_directory.barriers == 1 && only_directory.full_syncs == 0, "a directory alone is ordered");
 	SyncModel no_directory({9, 9, 9});
 	j::detail::files_sync_devices(fds, -1, -1, SyncMode::ordered, no_directory);
 	check(no_directory.durable() && no_directory.barriers == 0, "ordered mode without a directory is durable");
 	for (auto call : {SyncModel::Call::Stat, SyncModel::Call::Sync, SyncModel::Call::Barrier, SyncModel::Call::Flush}) {
-		SyncModel failed({9, 3, 9, 9});
+		SyncModel failed({9, 3, 9, 9}, call == SyncModel::Call::Flush ? j::FlushMode::full : plain);
 		failed.fault = SyncModel::Fault{call, 3, EIO};
 		if (call == SyncModel::Call::Flush) { failed.fault->fd = 1; }
 		if (call == SyncModel::Call::Barrier) { failed.fault->fd = 0; }
@@ -172,7 +171,7 @@ void directory_batches() {
 		}
 		check(failed.fault->remaining == 0 && !failed.ordered(), "a failed batch does not report ordering");
 	}
-	SyncModel interrupted({9, 9, 9, 9});
+	SyncModel interrupted({9, 9, 9, 9}, plain);
 	interrupted.fault = SyncModel::Fault{SyncModel::Call::Barrier, 0, EINTR};
 	j::detail::files_sync_devices(fds, 3, 3, SyncMode::ordered, interrupted);
 	check(interrupted.ordered() && interrupted.barriers == 2, "an interrupted barrier retries");

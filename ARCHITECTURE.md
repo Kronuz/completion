@@ -27,7 +27,7 @@ build/completion_demo /path/to/first-private-directory /path/to/second-private-d
 
 ## Flush modes
 
-`PosixIOOptions::flush_mode` (`FlushMode::plain` or `FlushMode::full`) has no default: `FlushMode` has no default constructor, so `PosixIOOptions{}` and `PosixIO(directory)` do not compile, and no process-wide switch exists. Whoever builds the `PosixIO` chooses; every sync the backend and its files issue follows it. The calls, per call site:
+`PosixIOOptions::flush_mode` (`FlushMode::plain` or `FlushMode::full`) has no default: `FlushMode` has no default constructor, so `PosixIOOptions{}` and `PosixIO(directory)` do not compile, and no process-wide switch exists. Whoever builds the `PosixIO` chooses; every sync the backend and its files issue follows it. One function, `sync_call(SyncSite, FlushMode, SyncPlatform)` in `posix_sync.h`, maps a site (`file`, `data`, `directory`, `order`) and the mode to the call, and every site issues what it names. The calls, per call site:
 
 | Call site | macOS `full` | macOS `plain` | Linux, both modes | FreeBSD, both modes |
 |---|---|---|---|---|

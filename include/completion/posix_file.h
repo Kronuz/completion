@@ -159,8 +159,8 @@ public:
 		do { result = ::ftruncate(fd_, checked_offset(size)); } while (result < 0 && errno == EINTR);
 		if (result < 0) { system_failure("truncate journal tail"); }
 	}
-	void sync() override { file_sync(fd_, calls_); }
-	void sync_data() override { file_sync_data(fd_, calls_); }
+	void sync() override { file_sync(fd_, calls_, SyncSite::file); }
+	void sync_data() override { file_sync(fd_, calls_, SyncSite::data); }
 	EntryInspection inspect() override {
 		struct stat status{};
 		if (::fstat(fd_, &status)) { system_failure("inspect held file"); }

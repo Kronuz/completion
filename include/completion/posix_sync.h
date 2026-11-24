@@ -20,8 +20,9 @@
  * THE SOFTWARE.
  */
 
-// How PosixIO syncs files: the flush mode, the sync system calls a test replaces, file_sync and
-// file_sync_data, and files_sync_devices, which stages a batch and flushes each device once.
+// How PosixIO syncs files: the flush mode and sync_call, the one table from a sync site to the
+// call it makes; the sync system calls a test replaces; file_sync; and files_sync_devices, which
+// stages a batch and flushes each device once.
 
 #pragma once
 
@@ -48,6 +49,41 @@ public:
 private:
 	Value value_;
 };
+
+// Where PosixIO syncs: File::sync (also owner.lock's creation and each device of a batch),
+// File::sync_data (the turn barrier's SyncData), sync_directory's flush, an ordering point.
+enum class SyncSite { file, data, directory, order };
+// The call a site makes after any staged fsync; `fsync` there means the staged fsync was all.
+enum class SyncCall { fsync, fdatasync, full_fsync, barrier_fsync };
+enum class SyncPlatform { macos, linux_kernel, other };
+#if defined(__APPLE__)
+inline constexpr SyncPlatform host_sync_platform = SyncPlatform::macos;
+#elif defined(__linux__)
+inline constexpr SyncPlatform host_sync_platform = SyncPlatform::linux_kernel;
+#else
+inline constexpr SyncPlatform host_sync_platform = SyncPlatform::other;
+#endif
+// The one place a flush mode becomes a call. macOS: full is F_FULLFSYNC everywhere; plain is
+// fsync, and F_BARRIERFSYNC at an ordering point. Linux: fsync, and fdatasync for sync_data, in
+// either mode. Elsewhere: fsync.
+constexpr SyncCall sync_call(SyncSite site, FlushMode mode, SyncPlatform platform = host_sync_platform) noexcept {
+	switch (platform) {
+	case SyncPlatform::macos:
+		if (mode == FlushMode::full) { return SyncCall::full_fsync; }
+		switch (site) {
+		case SyncSite::file: return SyncCall::fsync;
+		case SyncSite::data: return SyncCall::fsync;
+		case SyncSite::directory: return SyncCall::fsync;
+		case SyncSite::order: return SyncCall::barrier_fsync;
+		}
+		break;
+	case SyncPlatform::linux_kernel:
+		return site == SyncSite::data ? SyncCall::fdatasync : SyncCall::fsync;
+	case SyncPlatform::other:
+		break;
+	}
+	return SyncCall::fsync;
+}
 
 namespace detail {
 // The sync system calls PosixIO issues; a test replaces them through PosixIO::replace_sync_calls
@@ -90,41 +126,45 @@ struct SyncCalls {
 	WritebackCall writeback_call = &default_writeback;
 	int writeback(int fd) const { return writeback_call(fd); }
 #endif
-};
-// macOS: F_FULLFSYNC in full mode, fsync in plain; fsync elsewhere. A failure fails the call.
-inline void file_sync(int fd, const SyncCalls& calls) {
-	int result;
-#ifdef __APPLE__
-	const bool full = calls.mode == FlushMode::full;
-	do { result = full ? calls.full_sync(fd) : calls.sync(fd); } while (result < 0 && errno == EINTR);
-#else
-	do { result = calls.sync(fd); } while (result < 0 && errno == EINTR);
-#endif
-	if (result < 0) { system_failure("durably sync journal file"); }
-}
-// fdatasync on Linux; file_sync elsewhere (macOS's fdatasync is never the stronger call).
-inline void file_sync_data(int fd, const SyncCalls& calls) {
+	// One call sync_call chose, once; a call this platform lacks fails with ENOTSUP. Never
+	// replaced by another call: a failed F_FULLFSYNC fails, whatever its errno.
+	int issue(SyncCall call, int fd) const {
+		switch (call) {
+		case SyncCall::fsync: return sync(fd);
 #ifdef __linux__
-	int result;
-	do { result = calls.sync_data(fd); } while (result < 0 && errno == EINTR);
-	if (result < 0) { system_failure("durably sync journal data"); }
-#else
-	file_sync(fd, calls);
+		case SyncCall::fdatasync: return sync_data(fd);
 #endif
+#ifdef __APPLE__
+		case SyncCall::full_fsync: return full_sync(fd);
+		case SyncCall::barrier_fsync: return barrier(fd) < 0 ? -1 : 0;
+#endif
+		default: break;
+		}
+		errno = ENOTSUP;
+		return -1;
+	}
+};
+// One file's sync at `site` (file or data), the call sync_call names; a failure fails the call.
+inline void file_sync(int fd, const SyncCalls& calls, SyncSite site) {
+	const SyncCall call = sync_call(site, calls.mode);
+	int result;
+	do { result = calls.issue(call, fd); } while (result < 0 && errno == EINTR);
+	if (result < 0) { system_failure(site == SyncSite::data ? "durably sync journal data" : "durably sync journal file"); }
 }
 // How files_sync_devices leaves the device: durable, or ordered on the directory's device
 // (see PosixIO::order_files_and_directory).
 enum class SyncMode { durable, ordered };
-// Stages every file (and `directory`, when >= 0) with fsync; in full flush mode it then
-// flushes each distinct device once. Ordered issues a barrier, not a full flush, on the
-// directory's device; in full mode every other device is still flushed in full, in plain mode
-// it keeps its fsync. Plain and durable is the fsyncs alone.
+// Stages every file (and `directory`, when >= 0) with fsync, then makes each distinct device's
+// call once, as sync_call names it on macOS (this is macOS's batch): the order site's on the
+// directory's device when ordered, the file site's on every other. A device whose call is fsync
+// keeps its staged fsync, so plain and durable is the fsyncs alone, with no device to find.
 // `directory_flush` is the descriptor a flush of the directory's device goes through when
 // no file shares it (the owner file when held, else the directory). True when the directory's
 // device was ordered by a barrier that did not flush (a barrier returning 0).
 template <class Calls> inline bool files_sync_devices(std::span<const int> fds, int directory, int directory_flush, SyncMode mode, Calls& calls) {
 	if (fds.empty() && directory < 0) { return false; }
-	const bool full = calls.mode == FlushMode::full;
+	const SyncCall device_call = sync_call(SyncSite::file, calls.mode, SyncPlatform::macos);
+	const SyncCall order_call = mode == SyncMode::ordered ? sync_call(SyncSite::order, calls.mode, SyncPlatform::macos) : device_call;
 	struct DeviceFile { dev_t device; int fd; bool directory; };
 	std::vector<DeviceFile> devices;
 	devices.reserve(fds.size() + 1);
@@ -135,7 +175,7 @@ template <class Calls> inline bool files_sync_devices(std::span<const int> fds, 
 		if (result < 0) { system_failure("stat journal file"); }
 		devices.push_back({status.st_dev, flush_fd, is_directory});
 	};
-	if (full || mode == SyncMode::ordered) {
+	if (device_call != SyncCall::fsync || order_call != SyncCall::fsync) {
 		for (int fd : fds) { discover(fd, fd, false); }
 		if (directory >= 0) { discover(directory, directory_flush, true); }
 	}
@@ -157,13 +197,17 @@ template <class Calls> inline bool files_sync_devices(std::span<const int> fds, 
 		bool holds_directory = false;
 		for (std::size_t j = i; j < devices.size() && devices[j].device == devices[i].device; ++j) { holds_directory |= devices[j].directory; }
 		int result;
-		if (mode == SyncMode::ordered && holds_directory) {
+		switch (holds_directory ? order_call : device_call) {
+		case SyncCall::barrier_fsync:
 			do { result = calls.barrier(devices[i].fd); } while (result < 0 && errno == EINTR);
 			if (result < 0) { system_failure("order journal files"); }
 			ordered_only = result == 0;
-		} else if (full) {
+			break;
+		case SyncCall::full_fsync:
 			do { result = calls.full_sync(devices[i].fd); } while (result < 0 && errno == EINTR);
 			if (result < 0) { system_failure("durably sync journal file"); }
+			break;
+		default: break;  // fsync: the staged fsync was this device's sync
 		}
 	}
 	return ordered_only;

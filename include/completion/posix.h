@@ -262,12 +262,11 @@ public:
 		sync_directory();
 #endif
 	}
-	// macOS: fsync everything, then, in plain mode, one barrier on the directory's device; in full
-	// mode, one full flush per device, as sync_files_and_directory.
+	// macOS: fsync everything, then sync_call's order call on the directory's device (plain: one
+	// barrier; full: a full flush) and its file call on any other device.
 	void order_files_and_directory(std::span<File* const> files) override {
 #ifdef __APPLE__
-		const bool full = sync_calls_.mode == FlushMode::full;
-		const bool ordered_only = sync_staged(files, full ? detail::SyncMode::durable : detail::SyncMode::ordered);
+		const bool ordered_only = sync_staged(files, detail::SyncMode::ordered);
 		if (ordered_only && barrier_warning_ && !barrier_noted_.load(std::memory_order_relaxed)) { note_barrier_volume(); }
 #else
 		sync_files_and_directory(files);
@@ -277,14 +276,13 @@ public:
 		int result;
 		do { result = sync_calls_.sync(directory_); } while (result < 0 && errno == EINTR);
 		if (result < 0) { detail::system_failure("sync journal directory"); }
-#ifdef __APPLE__
-		// Directory fsync establishes namespace ordering; in full mode, fullsync then asks the
-		// storage device to flush its cache, through the owner file when held, else the directory.
-		if (sync_calls_.mode != FlushMode::full) { return; }
+		// Directory fsync establishes namespace ordering; a stronger call (macOS full: F_FULLFSYNC)
+		// then asks the storage device to flush its cache, through the owner file when held.
+		const SyncCall call = sync_call(SyncSite::directory, sync_calls_.mode);
+		if (call == SyncCall::fsync) { return; }
 		const int owner = owner_fd_.load();
-		do { result = sync_calls_.full_sync(owner >= 0 ? owner : directory_); } while (result < 0 && errno == EINTR);
+		do { result = sync_calls_.issue(call, owner >= 0 ? owner : directory_); } while (result < 0 && errno == EINTR);
 		if (result < 0) { detail::system_failure("durably sync journal file"); }
-#endif
 	}
 
 private:
@@ -419,7 +417,7 @@ private:
 			owner->hold_file(open_file("owner.lock", create));
 			lock_exclusive(owner->fd(), "lock journal owner", "files");
 			owner_fd_.store(owner->fd());
-			if (create) { detail::file_sync(owner->fd(), sync_calls_); }
+			if (create) { detail::file_sync(owner->fd(), sync_calls_, SyncSite::file); }
 		}
 		return owner;
 	}

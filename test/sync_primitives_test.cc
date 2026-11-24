@@ -50,6 +50,23 @@ static_assert(!std::is_constructible_v<c::PosixIO, std::filesystem::path>);
 static_assert(!std::is_constructible_v<c::PosixIO, std::filesystem::path, unsigned>);
 static_assert(std::is_constructible_v<c::PosixIO, std::filesystem::path, c::PosixIOOptions, unsigned>);
 
+// sync_call, the one table from a site and a mode to the call, on every platform's row.
+namespace table {
+using kronuz::journal::sync_call;
+using Site = kronuz::journal::SyncSite;
+using Call = kronuz::journal::SyncCall;
+using Platform = kronuz::journal::SyncPlatform;
+constexpr auto full = c::FlushMode::full, plain = c::FlushMode::plain;
+static_assert(sync_call(Site::file, full, Platform::macos) == Call::full_fsync && sync_call(Site::data, full, Platform::macos) == Call::full_fsync &&
+	sync_call(Site::directory, full, Platform::macos) == Call::full_fsync && sync_call(Site::order, full, Platform::macos) == Call::full_fsync);
+static_assert(sync_call(Site::file, plain, Platform::macos) == Call::fsync && sync_call(Site::data, plain, Platform::macos) == Call::fsync &&
+	sync_call(Site::directory, plain, Platform::macos) == Call::fsync && sync_call(Site::order, plain, Platform::macos) == Call::barrier_fsync);
+static_assert(sync_call(Site::data, full, Platform::linux_kernel) == Call::fdatasync && sync_call(Site::data, plain, Platform::linux_kernel) == Call::fdatasync);
+static_assert(sync_call(Site::file, full, Platform::linux_kernel) == Call::fsync && sync_call(Site::directory, plain, Platform::linux_kernel) == Call::fsync &&
+	sync_call(Site::order, full, Platform::linux_kernel) == Call::fsync);
+static_assert(sync_call(Site::data, full, Platform::other) == Call::fsync && sync_call(Site::order, plain, Platform::other) == Call::fsync);
+} // namespace table
+
 namespace {
 void check(bool value, const char *what) {
 	if (!value) {
