@@ -87,6 +87,10 @@ public:
 		if (artifact_mode != 0600 && artifact_mode != 0640 && artifact_mode != 0644) {
 			throw std::invalid_argument("unsupported artifact permissions");
 		}
+		// Options copied from raw bytes can hold a mode FlushMode never admitted.
+		if (!(options.flush_mode == FlushMode::plain) && !(options.flush_mode == FlushMode::full)) {
+			throw std::invalid_argument("flush mode must be plain or full");
+		}
 		constexpr int flags = O_RDONLY | O_DIRECTORY | O_CLOEXEC;
 		directory_ = ::open(directory.c_str(), flags | O_NOFOLLOW);
 		// A final symlink fails O_NOFOLLOW with ELOOP, EMLINK (FreeBSD), or ENOTDIR (O_DIRECTORY).
@@ -147,21 +151,19 @@ public:
 	// A test seam: the system calls the sync paths issue on this platform; null is the system
 	// call. Call before opening the files it should see: a file keeps the calls it opened with.
 	// macOS: fsync and fcntl (F_FULLFSYNC, F_BARRIERFSYNC); Linux: fsync, fdatasync and the
-	// sync_file_range writeback hint; elsewhere: fsync.
+	// sync_file_range writeback hint; elsewhere: fsync. A process holds 255 distinct seams at most.
 #ifdef __APPLE__
-	void replace_sync_calls(detail::FsyncCall fsync_call, detail::FcntlCall fcntl_call) noexcept {
-		sync_calls_.fsync_call = fsync_call ? fsync_call : &::fsync;
-		sync_calls_.fcntl_call = fcntl_call ? fcntl_call : &detail::default_fcntl;
+	void replace_sync_calls(detail::FsyncCall fsync_call, detail::FcntlCall fcntl_call) {
+		sync_calls_.seam = detail::intern_sync_seam({fsync_call ? fsync_call : &::fsync, fcntl_call ? fcntl_call : &detail::default_fcntl});
 	}
 #elif defined(__linux__)
-	void replace_sync_calls(detail::FsyncCall fsync_call, detail::FsyncCall fdatasync_call, detail::WritebackCall writeback_call) noexcept {
-		sync_calls_.fsync_call = fsync_call ? fsync_call : &::fsync;
-		sync_calls_.fdatasync_call = fdatasync_call ? fdatasync_call : &::fdatasync;
-		sync_calls_.writeback_call = writeback_call ? writeback_call : &detail::default_writeback;
+	void replace_sync_calls(detail::FsyncCall fsync_call, detail::FsyncCall fdatasync_call, detail::WritebackCall writeback_call) {
+		sync_calls_.seam = detail::intern_sync_seam({fsync_call ? fsync_call : &::fsync, fdatasync_call ? fdatasync_call : &::fdatasync,
+			writeback_call ? writeback_call : &detail::default_writeback});
 	}
 #else
-	void replace_sync_calls(detail::FsyncCall fsync_call) noexcept {
-		sync_calls_.fsync_call = fsync_call ? fsync_call : &::fsync;
+	void replace_sync_calls(detail::FsyncCall fsync_call) {
+		sync_calls_.seam = detail::intern_sync_seam({fsync_call ? fsync_call : &::fsync});
 	}
 #endif
 #ifdef KRONUZ_COMPLETION_STATFS
@@ -242,15 +244,7 @@ public:
 		return detail::inspect_status(status);
 	}
 	void sync_files(std::span<File* const> files) override {
-		std::vector<int> fds;
-		fds.reserve(files.size());
-		for (auto* file : files) {
-			if (auto* posix = dynamic_cast<detail::PosixFile*>(file)) {
-				fds.push_back(posix->native_handle());
-			} else {
-				file->sync();
-			}
-		}
+		const auto fds = batch_fds(files);
 		detail::files_sync(fds, sync_calls_);
 	}
 	// macOS: one device flush shared by the files and the directory entries.
@@ -286,6 +280,21 @@ public:
 	}
 
 private:
+	// The descriptors this backend's batch syncs. Every other file syncs itself first: another
+	// backend's file, and a PosixFile whose mode this batch would weaken (batch_weakens).
+	std::vector<int> batch_fds(std::span<File* const> files) {
+		std::vector<int> fds;
+		fds.reserve(files.size());
+		for (auto* file : files) {
+			auto* posix = dynamic_cast<detail::PosixFile*>(file);
+			if (posix && !batch_weakens(posix->flush_mode(), sync_calls_.mode)) {
+				fds.push_back(posix->native_handle());
+			} else {
+				file->sync();
+			}
+		}
+		return fds;
+	}
 	// Whether `name` is a regular file this process owns, alone on its link and on the directory's device.
 	bool reclaimable(std::string_view name) {
 		detail::PosixName component(name); struct stat status{};
@@ -307,15 +316,7 @@ private:
 #ifdef __APPLE__
 	// True when the directory's device was ordered by a barrier that did not flush.
 	bool sync_staged(std::span<File* const> files, detail::SyncMode mode) {
-		std::vector<int> fds;
-		fds.reserve(files.size());
-		for (auto* file : files) {
-			if (auto* posix = dynamic_cast<detail::PosixFile*>(file)) {
-				fds.push_back(posix->native_handle());
-			} else {
-				file->sync();
-			}
-		}
+		const auto fds = batch_fds(files);
 		if (fds.empty() && mode == detail::SyncMode::durable) { sync_directory(); return false; }
 		const int owner = owner_fd_.load();
 		return detail::files_sync_devices(fds, directory_, owner >= 0 ? owner : directory_, mode, sync_calls_);

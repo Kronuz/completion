@@ -271,6 +271,8 @@ public:
 	// failures throw. A backend supporting reclamation overrides both hooks.
 	virtual std::unique_ptr<File> open_reclaim_candidate(std::string_view name) { return open_existing(name); }
 	virtual void sync_directory() = 0;
+	// Durable is the backend's promise: PosixIO's FlushMode::plain on macOS survives a crash, not
+	// a power loss (posix_sync.h).
 	// Makes every file durable, as File::sync on each would; a backend may share one
 	// device flush among them. After a failure, which files are durable is unspecified.
 	virtual void sync_files(std::span<File* const> files) {

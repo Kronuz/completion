@@ -134,6 +134,8 @@ public:
 	void install(int fd) noexcept { fd_ = fd; }
 	// Trusted completion backend only. The owning File lease retains this FD.
 	int native_handle() const noexcept { return fd_; }
+	// The flush mode its syncs follow, its backend's at open.
+	FlushMode flush_mode() const noexcept { return calls_.mode; }
 	std::uint64_t size() override {
 		struct stat status{};
 		if (::fstat(fd_, &status)) { system_failure("stat journal size"); }
@@ -348,6 +350,9 @@ private:
 	SyncCalls calls_;
 	bool lease_ = false;
 };
+// A process holds millions of open files: the vtable pointer, the descriptor, two bytes of
+// SyncCalls and the lease flag, with no seam copied per file.
+static_assert(sizeof(PosixFile) == sizeof(void*) + 2 * sizeof(int));
 } // namespace detail
 
 } // namespace kronuz::journal

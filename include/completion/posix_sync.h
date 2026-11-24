@@ -28,8 +28,12 @@
 
 #include "posix_support.h"
 #include <algorithm>
+#include <array>
 #include <cerrno>
+#include <cstdint>
+#include <mutex>
 #include <span>
+#include <stdexcept>
 #include <vector>
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -40,11 +44,13 @@ namespace kronuz::journal {
 // How far PosixIO's syncs push data on macOS, chosen by whoever builds the PosixIO: `full` issues
 // F_FULLFSYNC for every durable sync and every ordering point; `plain` issues fsync for durable
 // syncs, which leaves data in the drive's cache, and F_BARRIERFSYNC for ordering points. Linux and
-// FreeBSD make the same calls in both modes. It has no default, so PosixIOOptions{} does not compile.
+// FreeBSD make the same calls in both modes. It has no default, so PosixIOOptions{} does not compile,
+// and Value has no zero: a value-initialized Value names no mode, and FlushMode refuses it.
 class FlushMode {
 public:
-	enum Value : unsigned char { plain, full };
-	constexpr FlushMode(Value value) noexcept : value_(value) {}
+	enum Value : unsigned char { plain = 1, full = 2 };
+	constexpr FlushMode(Value value)
+		: value_(value == plain || value == full ? value : throw std::invalid_argument("flush mode must be plain or full")) {}
 	constexpr bool operator==(const FlushMode&) const noexcept = default;
 private:
 	Value value_;
@@ -84,6 +90,11 @@ constexpr SyncCall sync_call(SyncSite site, FlushMode mode, SyncPlatform platfor
 	}
 	return SyncCall::fsync;
 }
+// Whether a batch in `batch` mode would sync a `file`-mode file with a weaker call than the file's
+// own File::sync (macOS: a full file in a plain batch). Such a file syncs itself.
+constexpr bool batch_weakens(FlushMode file, FlushMode batch, SyncPlatform platform = host_sync_platform) noexcept {
+	return file == FlushMode::full && sync_call(SyncSite::file, file, platform) != sync_call(SyncSite::file, batch, platform);
+}
 
 namespace detail {
 // The sync system calls PosixIO issues; a test replaces them through PosixIO::replace_sync_calls
@@ -100,31 +111,61 @@ inline bool barrier_unsupported(int error) { return error == ENOTSUP || error ==
 using WritebackCall = int (*)(int fd);
 inline int default_writeback(int fd) { return ::sync_file_range(fd, 0, 0, SYNC_FILE_RANGE_WRITE); }
 #endif
-// The flush mode and the calls that carry it out; every PosixFile keeps the copy it opened with.
-struct SyncCalls {
-	FlushMode mode;
+// The system calls the sync paths issue; the default is the system's.
+struct SyncSeam {
 	FsyncCall fsync_call = &::fsync;
-	int sync(int fd) const { return fsync_call(fd); }
 #ifdef __APPLE__
 	FcntlCall fcntl_call = &default_fcntl;
+#endif
+#ifdef __linux__
+	FsyncCall fdatasync_call = &::fdatasync;
+	WritebackCall writeback_call = &default_writeback;
+#endif
+	constexpr bool operator==(const SyncSeam&) const noexcept = default;
+};
+// Every seam in use, each once, so a file names its seam in one byte: 0 is the default, and an
+// entry is written once, under the mutex, before its index is handed out, and never changes.
+struct SyncSeams {
+	std::array<SyncSeam, 256> entries{};
+	unsigned count = 1;
+	std::mutex mutex;
+};
+inline constinit SyncSeams sync_seams{};
+// The index of `seam`, added when new; throws past 255 seams other than the default.
+inline std::uint8_t intern_sync_seam(const SyncSeam& seam) {
+	if (seam == SyncSeam{}) { return 0; }
+	std::lock_guard lock(sync_seams.mutex);
+	for (unsigned i = 1; i < sync_seams.count; ++i) {
+		if (sync_seams.entries[i] == seam) { return static_cast<std::uint8_t>(i); }
+	}
+	if (sync_seams.count == sync_seams.entries.size()) { throw std::length_error("too many distinct sync seams"); }
+	sync_seams.entries[sync_seams.count] = seam;
+	return static_cast<std::uint8_t>(sync_seams.count++);
+}
+// The flush mode and the seam that carry out a sync, two bytes; every PosixFile keeps the copy it
+// opened with.
+struct SyncCalls {
+	FlushMode mode;
+	std::uint8_t seam = 0;  // sync_seams.entries' index
+	const SyncSeam& calls() const noexcept { return sync_seams.entries[seam]; }
+	int sync(int fd) const { return calls().fsync_call(fd); }
+#ifdef __APPLE__
 	int stat(int fd, struct stat* status) const { return ::fstat(fd, status); }
-	int full_sync(int fd) const { return fcntl_call(fd, F_FULLFSYNC); }
+	int full_sync(int fd) const { return calls().fcntl_call(fd, F_FULLFSYNC); }
 	// F_BARRIERFSYNC, 0 when it ordered; where the filesystem lacks the call, the stronger
 	// full flush, 1 when it succeeded. Any other error (EIO, ...) is the barrier's own failure
 	// and is returned, never retried.
 	int barrier(int fd) const {
 		int result;
-		do { result = fcntl_call(fd, F_BARRIERFSYNC); } while (result < 0 && errno == EINTR);
+		do { result = calls().fcntl_call(fd, F_BARRIERFSYNC); } while (result < 0 && errno == EINTR);
 		if (result >= 0 || !barrier_unsupported(errno)) { return result < 0 ? result : 0; }
 		do { result = full_sync(fd); } while (result < 0 && errno == EINTR);
 		return result < 0 ? result : 1;
 	}
 #endif
 #ifdef __linux__
-	FsyncCall fdatasync_call = &::fdatasync;
-	int sync_data(int fd) const { return fdatasync_call(fd); }
-	WritebackCall writeback_call = &default_writeback;
-	int writeback(int fd) const { return writeback_call(fd); }
+	int sync_data(int fd) const { return calls().fdatasync_call(fd); }
+	int writeback(int fd) const { return calls().writeback_call(fd); }
 #endif
 	// One call sync_call chose, once; a call this platform lacks fails with ENOTSUP. Never
 	// replaced by another call: a failed F_FULLFSYNC fails, whatever its errno.
@@ -144,6 +185,7 @@ struct SyncCalls {
 		return -1;
 	}
 };
+static_assert(sizeof(SyncCalls) == 2);
 // One file's sync at `site` (file or data), the call sync_call names; a failure fails the call.
 inline void file_sync(int fd, const SyncCalls& calls, SyncSite site) {
 	const SyncCall call = sync_call(site, calls.mode);

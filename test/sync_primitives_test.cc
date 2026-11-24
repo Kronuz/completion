@@ -30,6 +30,7 @@
 #include "completion/native_completion.h"
 #include <chrono>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <functional>
 #include <iostream>
@@ -320,6 +321,42 @@ void table_rows() {
 			check(sync_call(site, mode, Platform::other) == Call::fsync, "elsewhere fsync, in both modes");
 		}
 	}
+	using kronuz::journal::batch_weakens;
+	check(batch_weakens(full, plain, Platform::macos), "macOS: a plain batch would weaken a full file");
+	check(!batch_weakens(plain, full, Platform::macos) && !batch_weakens(full, full, Platform::macos) && !batch_weakens(plain, plain, Platform::macos),
+		"macOS: a batch weakens no plain file and no file of its own mode");
+	for (auto platform : {Platform::linux_kernel, Platform::other}) {
+		for (auto file : {full, plain}) {
+			for (auto batch : {full, plain}) { check(!batch_weakens(file, batch, platform), "Linux and elsewhere: no batch weakens a file"); }
+		}
+	}
+}
+
+// No mode is implicit: FlushMode has no default and Value has no zero, so a value-initialized or
+// out-of-range Value is refused when it becomes a FlushMode, and a PosixIO refuses options whose
+// bytes hold one.
+static_assert(!std::is_default_constructible_v<c::FlushMode>);
+static_assert(c::FlushMode::plain != c::FlushMode::Value{} && c::FlushMode::full != c::FlushMode::Value{});
+void flush_mode_values(const std::filesystem::path &base) {
+	auto refused = [](auto &&body) {
+		try { body(); } catch (const std::invalid_argument &) { return true; }
+		return false;
+	};
+	for (unsigned raw : {0u, 3u, 255u}) {
+		const auto value = static_cast<c::FlushMode::Value>(raw);
+		check(refused([&] { c::FlushMode mode(value); (void)mode; }), "a FlushMode refuses a Value other than plain or full");
+		check(refused([&] { c::PosixIOOptions options{.flush_mode = value}; (void)options; }), "options refuse a Value other than plain or full");
+	}
+	const c::FlushMode::Value unchosen{};
+	check(refused([&] { c::PosixIOOptions options{unchosen}; (void)options; }), "options refuse a value-initialized Value");
+	const auto directory = base / "mode-values";
+	std::filesystem::create_directory(directory);
+	std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
+	for (unsigned char raw : {0, 3, 255}) {
+		c::PosixIOOptions options{.flush_mode = c::FlushMode::full};
+		std::memset(static_cast<void *>(&options.flush_mode), raw, sizeof options.flush_mode);
+		check(refused([&] { c::PosixIO io(directory, options); }), "a PosixIO refuses options whose mode is neither plain nor full");
+	}
 }
 
 // The owner lock file's creation, File::sync and File::sync_data, and the Sync, SyncData (the
@@ -350,6 +387,94 @@ void call_sites(const std::filesystem::path &base, c::FlushMode mode) {
 		expect(run(through, f, c::Kind::SyncData, f.everything), want.sync_data_primitive, "SyncData of a, the turn barrier" + at);
 		expect(run(through, f, c::Kind::DirectorySync, f.empty), want.directory_sync, "DirectorySync flushes through owner.lock" + at);
 	}
+}
+
+// Every path where a file is synced by a backend other than its own, both ways across modes: the
+// IO methods, the Sync, SyncFiles and OrderFiles primitives (drive_synchronously and the native
+// queue), and SyncData. A file the batch would weaken (macOS: full in a plain batch) syncs itself
+// first; a plain file in a full batch shares the batch's full flush. Files a (read-write), d
+// (read-only), b of the `file_mode` backend; "batchdir" is the batching backend's directory.
+struct Crossed {
+	Log sync_group, order_group, sync, sync_data;
+};
+Crossed crossed_for([[maybe_unused]] c::FlushMode file_mode) {
+#ifdef __APPLE__
+	if (file_mode == c::FlushMode::full) {  // a plain batch
+		const Log own{"full:a", "full:d", "full:b"};
+		Log order = own;
+		order.insert(order.end(), {"fsync:batchdir", "barrier:batchdir"});
+		Log sync = own;
+		sync.push_back("fsync:batchdir");
+		return {sync, order, {"full:a"}, {"full:a"}};
+	}
+	const Log batch{"fsync:a", "fsync:d", "fsync:b", "fsync:batchdir", "full:a"};  // a full batch
+	return {batch, batch, {"fsync:a", "full:a"}, {"fsync:a"}};
+#elif defined(__linux__)
+	const Log group{"writeback:a", "writeback:d", "writeback:b", "fsync:a", "fsync:d", "fsync:b", "fsync:batchdir"};
+	return {group, group, {"writeback:a", "fsync:a"}, {"fdatasync:a"}};
+#else
+	const Log group{"fsync:a", "fsync:d", "fsync:b", "fsync:batchdir"};
+	return {group, group, {"fsync:a"}, {"fsync:a"}};
+#endif
+}
+void cross_backend(const std::filesystem::path &base, c::FlushMode file_mode) {
+	const auto batch_mode = file_mode == c::FlushMode::full ? c::FlushMode::plain : c::FlushMode::full;
+	Fixture batcher(base / "cross-batch", batch_mode);
+	auto batcher_names = names;
+	for (auto &[identity, name] : batcher_names) {
+		if (name == "dir") { name = "batchdir"; }
+	}
+	Fixture f(base / "cross-files", file_mode);
+	names.insert(batcher_names.begin(), batcher_names.end());
+	const auto want = crossed_for(file_mode);
+	const std::string in = std::string(" of") + mode_name(file_mode) + " files in a" + mode_name(batch_mode) + " batch";
+	std::vector<std::pair<const char *, Route>> routes{{"IO method", direct}, {"drive_synchronously", synchronous}, {"native queue", queued}};
+	for (auto &[route, through] : routes) {
+		const std::string at = in + " through the " + route;
+		expect(run(through, batcher, c::Kind::SyncFiles, f.everything), want.sync_group, "SyncFiles" + at);
+		expect(run(through, batcher, c::Kind::OrderFiles, f.everything), want.order_group, "OrderFiles" + at);
+#if !defined(__APPLE__)
+		if (std::string_view(route) == "native queue") { continue; }  // the kernel's own fsync, past the seam
+#endif
+		expect(run(through, batcher, c::Kind::Sync, f.everything), want.sync, "Sync" + at);
+		expect(run(through, batcher, c::Kind::SyncData, f.everything), want.sync_data, "SyncData" + at);
+	}
+	auto files = f.raw(f.everything);
+	calls.clear();
+	batcher.io->sync_files(files);
+	Log batched = want.sync_group;
+	batched.erase(std::remove(batched.begin(), batched.end(), "fsync:batchdir"), batched.end());
+	expect(calls, batched, "sync_files" + in);
+}
+
+// A reusable file syncs in its backend's mode: make_closed_file gives it the mode, which no open
+// into it changes (create_exclusive_into, open_existing_into, open_reclaim_candidate_into).
+void reusable(const std::filesystem::path &base, c::FlushMode mode) {
+	Fixture f(base / "reusable", mode);
+	Log want_sync{"fsync:r"}, want_data{"fsync:r"};
+#ifdef __APPLE__
+	if (mode == c::FlushMode::full) { want_sync = want_data = {"full:r"}; }
+#elif defined(__linux__)
+	want_data = {"fdatasync:r"};
+#endif
+	const std::string in = mode_name(mode);
+	auto closed = f.io->make_closed_file();
+	auto syncs = [&](const std::string &opened) {
+		calls.clear();
+		closed->sync();
+		expect(calls, want_sync, "File::sync of a reusable file after " + opened + in);
+		calls.clear();
+		closed->sync_data();
+		expect(calls, want_data, "File::sync_data of a reusable file after " + opened + in);
+		closed->close();
+	};
+	f.io->create_exclusive_into("r", *closed);
+	check(closed->write_at(0, "bytes") == 5, "write a reusable file");
+	syncs("create_exclusive_into");
+	f.io->open_existing_into("r", *closed);
+	syncs("open_existing_into");
+	check(f.io->open_reclaim_candidate_into("r", *closed), "the reusable file reopens as a reclaim candidate");
+	syncs("open_reclaim_candidate_into");
 }
 
 void read_only_descriptor(const std::filesystem::path &base) {
@@ -462,9 +587,12 @@ int main(int argc, char **argv) {
 	std::filesystem::remove_all(base);
 	std::filesystem::create_directory(base);
 	table_rows();
+	flush_mode_values(base);
 	for (c::FlushMode mode : {c::FlushMode::plain, c::FlushMode::full}) {
 		sequences(base, mode);
 		call_sites(base, mode);
+		cross_backend(base, mode);
+		reusable(base, mode);
 	}
 	read_only_descriptor(base);
 	invalid_group(base);
