@@ -20,9 +20,10 @@
  * THE SOFTWARE.
  */
 
-// PosixIO's real sync call sequence on a real directory, recorded through replace_sync_calls:
-// which files and the directory are fsync'd, what the one ordering point issues, which barrier
-// errors fail the commit, and when the barrier warning fires (once per volume, macOS only).
+// PosixIO's real sync call sequence on a real directory, recorded through replace_sync_calls, in
+// each flush mode: which files and the directory are fsync'd, what the one ordering point issues,
+// which barrier errors fail the commit, that full mode fails rather than issue a weaker call, and
+// when the barrier warning fires (once per volume, plain mode on macOS only).
 #include "completion/posix.h"
 #include <algorithm>
 #include <cstdlib>
@@ -114,7 +115,8 @@ struct Fixture {
 		std::filesystem::remove_all(directory);
 		std::filesystem::create_directory(directory);
 		std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
-		io = std::make_unique<j::PosixIO>(directory, 0600, options);
+		io = std::make_unique<j::PosixIO>(directory, options);
+		io->replace_sync_calls(&record_fsync, &record_fcntl);
 		owner = io->acquire_owner(true);
 		for (const char *name : {"a", "b", "c"}) {
 			auto file = io->create_exclusive(name);
@@ -122,38 +124,93 @@ struct Fixture {
 			all.push_back(file.get());
 			files.push_back(std::move(file));
 		}
-		io->replace_sync_calls(&record_fsync, &record_fcntl);
+		calls.clear();
 	}
 	std::string dir() const { return directory.filename().string(); }
 };
 Log cat(Log a, const Log& b) { a.insert(a.end(), b.begin(), b.end()); return a; }
 
-void ordering_protocol(const std::filesystem::path& base) {
-	Fixture f(base / "ordered", {});
+// Plain mode: fsync is every durable sync, one barrier every ordering point; no full flush.
+void plain_protocol(const std::filesystem::path& base) {
+	Fixture f(base / "plain", {.flush_mode = j::FlushMode::plain});
 	const Log stage{"fsync:a", "fsync:b", "fsync:c", "fsync:" + f.dir()};
 	// One ordering point: every file and the directory fsync'd, then one barrier and no flush.
 	expect(run([&] { f.io->order_files_and_directory(f.all); }), cat(stage, {"barrier"}),
 		"order_files_and_directory fsyncs each file and the directory, then issues one barrier");
 	// The directory alone is still ordered.
 	expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "barrier"}, "a directory-only ordering point");
-	// The publication's sync_directory is the first full flush.
-	expect(run([&] { f.io->sync_directory(); }), {"fsync:" + f.dir(), "full"}, "sync_directory fsyncs the directory then flushes in full");
-	// Durable batches flush in full and never barrier.
-	expect(run([&] { f.io->sync_files_and_directory(f.all); }), cat(stage, {"full"}), "sync_files_and_directory is one full flush");
-	expect(run([&] { f.io->sync_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "an empty durable batch syncs the directory");
-	expect(run([&] { f.io->sync_files(f.all); }), {"fsync:a", "fsync:b", "fsync:c", "full"}, "sync_files is one full flush");
+	expect(run([&] { f.io->sync_directory(); }), {"fsync:" + f.dir()}, "sync_directory fsyncs the directory alone");
+	// Durable batches are their fsyncs and never barrier.
+	expect(run([&] { f.io->sync_files_and_directory(f.all); }), stage, "sync_files_and_directory fsyncs the files and the directory");
+	expect(run([&] { f.io->sync_files_and_directory({}); }), {"fsync:" + f.dir()}, "an empty durable batch syncs the directory");
+	expect(run([&] { f.io->sync_files(f.all); }), {"fsync:a", "fsync:b", "fsync:c"}, "sync_files fsyncs each file");
+	expect(run([&] { f.files[0]->sync(); }), {"fsync:a"}, "File::sync is an fsync");
+	expect(run([&] { f.files[0]->sync_data(); }), {"fsync:a"}, "File::sync_data is an fsync");
 	// A foreign file syncs itself; the directory is still ordered.
 	Log foreign_log;
 	Foreign foreign(f.io->open_existing("a"), foreign_log);
 	std::vector<j::File*> only_foreign{&foreign};
-	expect(run([&] { f.io->order_files_and_directory(only_foreign); }), {"fsync:" + f.dir(), "barrier"},
-		"a foreign file leaves the directory ordered");
+	expect(run([&] { f.io->order_files_and_directory(only_foreign); }), {"fsync:a", "fsync:" + f.dir(), "barrier"},
+		"a foreign file syncs itself and leaves the directory ordered");
 	check(foreign_log == Log{"foreign"}, "a foreign file syncs itself once");
+}
+
+// Full mode: every durable sync and every ordering point flushes in full (F_FULLFSYNC); no barrier.
+void full_protocol(const std::filesystem::path& base) {
+	Fixture f(base / "full", {.flush_mode = j::FlushMode::full});
+	const Log stage{"fsync:a", "fsync:b", "fsync:c", "fsync:" + f.dir()};
+	expect(run([&] { f.io->order_files_and_directory(f.all); }), cat(stage, {"full"}), "an ordering point is one full flush");
+	expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "a directory alone is ordered in full");
+	expect(run([&] { f.io->sync_directory(); }), {"fsync:" + f.dir(), "full"}, "sync_directory fsyncs the directory then flushes in full");
+	expect(run([&] { f.io->sync_files_and_directory(f.all); }), cat(stage, {"full"}), "sync_files_and_directory is one full flush");
+	expect(run([&] { f.io->sync_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "an empty durable batch syncs the directory");
+	expect(run([&] { f.io->sync_files(f.all); }), {"fsync:a", "fsync:b", "fsync:c", "full"}, "sync_files is one full flush");
+	expect(run([&] { f.files[0]->sync(); }), {"full"}, "File::sync is a full flush");
+	expect(run([&] { f.files[0]->sync_data(); }), {"full"}, "File::sync_data is a full flush");
+	Log foreign_log;
+	Foreign foreign(f.io->open_existing("a"), foreign_log);
+	std::vector<j::File*> only_foreign{&foreign};
+	expect(run([&] { f.io->order_files_and_directory(only_foreign); }), {"full", "fsync:" + f.dir(), "full"},
+		"a foreign file flushes itself and the directory is flushed in full");
+	check(foreign_log == Log{"foreign"}, "a foreign file syncs itself once");
+}
+
+// Full mode never degrades: where F_FULLFSYNC is unsupported (or fails), every call site fails
+// with its errno, and no fsync stands in for the flush.
+void full_refusal(const std::filesystem::path& base) {
+	Fixture f(base / "full-refusal", {.flush_mode = j::FlushMode::full});
+	const std::pair<const char*, std::function<void()>> sites[] = {
+		{"File::sync", [&] { f.files[0]->sync(); }},
+		{"File::sync_data", [&] { f.files[0]->sync_data(); }},
+		{"sync_files", [&] { f.io->sync_files(f.all); }},
+		{"sync_files_and_directory", [&] { f.io->sync_files_and_directory(f.all); }},
+		{"order_files_and_directory", [&] { f.io->order_files_and_directory(f.all); }},
+		{"sync_directory", [&] { f.io->sync_directory(); }},
+	};
+	for (int error : {ENOTSUP, EOPNOTSUPP, ENOTTY, EINVAL, EIO}) {
+		full_error = error;
+		for (const auto& [name, site] : sites) {
+			bool threw = false;
+			calls.clear();
+			try { site(); } catch (const std::system_error& e) { threw = e.code() == std::error_code(error, std::generic_category()); }
+			check(threw, (std::string(name) + " fails with the full flush's errno").c_str());
+			check(!calls.empty() && calls.back() == "full", (std::string(name) + " issues nothing after the failed full flush").c_str());
+		}
+		f.owner.reset();
+		calls.clear();
+		bool threw = false;
+		std::filesystem::remove(f.directory / "owner.lock");
+		try { f.owner = f.io->acquire_owner(true); } catch (const std::system_error& e) { threw = e.code() == std::error_code(error, std::generic_category()); }
+		check(threw && calls == Log{"full"}, "creating owner.lock fails with the full flush's errno, never an fsync");
+		std::filesystem::remove(f.directory / "owner.lock");
+		full_error = 0;
+		f.owner = f.io->acquire_owner(true);
+	}
 }
 
 // The publication's flush goes through the owner file while one is held, and through the directory otherwise.
 void flush_target(const std::filesystem::path& base) {
-	Fixture f(base / "flush-target", {});
+	Fixture f(base / "flush-target", {.flush_mode = j::FlushMode::full});
 	run([&] { f.io->sync_directory(); });
 	check(full_target == "owner.lock", "sync_directory flushes through the owner file while it is held");
 	f.owner.reset();
@@ -162,7 +219,7 @@ void flush_target(const std::filesystem::path& base) {
 }
 
 void errno_rule(const std::filesystem::path& base) {
-	Fixture f(base / "errno-rule", {});
+	Fixture f(base / "errno-rule", {.flush_mode = j::FlushMode::plain});
 	for (int error : {EIO, ENOSPC, EDQUOT, EINVAL, EBADF}) {
 		barrier_error = error; barrier_failures = 1000;
 		bool threw = false;
@@ -190,16 +247,9 @@ void errno_rule(const std::filesystem::path& base) {
 	barrier_error = 0; barrier_failures = 0;
 }
 
-void full_flush_option(const std::filesystem::path& base) {
-	Fixture f(base / "full-flush", {.full_flush_ordering = true});
-	expect(run([&] { f.io->order_files_and_directory(f.all); }), {"fsync:a", "fsync:b", "fsync:c", "fsync:" + f.dir(), "full"},
-		"full_flush_ordering replaces the barrier with one full flush");
-	expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "full_flush_ordering orders a directory alone in full");
-}
-
 // The context reaches the callback unchanged.
 int warning_context = 0;
-j::PosixIOOptions warned(j::PosixIOOptions options = {}) {
+j::PosixIOOptions warned(j::PosixIOOptions options) {
 	options.barrier_warning = [](void* context, const j::BarrierWarning& warning) {
 		check(context == &warning_context, "the callback receives its context");
 		++warning_calls;
@@ -209,7 +259,7 @@ j::PosixIOOptions warned(j::PosixIOOptions options = {}) {
 	options.barrier_warning_context = &warning_context;
 	return options;
 }
-[[maybe_unused]] constexpr j::PosixIOOptions literal_options{.full_flush_ordering = true};  // options stay a literal type
+[[maybe_unused]] constexpr j::PosixIOOptions literal_options{.flush_mode = j::FlushMode::full};  // options stay a literal type
 j::BarrierStorage other_storage(const struct statfs&) { return {false, "test storage"}; }
 j::BarrierStorage apple_storage(const struct statfs&) { return {true, "APPLE SSD test (PCI-Express, Internal)"}; }
 std::string mount_point(const struct statfs& status) { return std::string(status.f_mntonname, ::strnlen(status.f_mntonname, sizeof status.f_mntonname)); }
@@ -223,7 +273,7 @@ int quiet_fsync(int) { calls.push_back("fsync"); return 0; }
 int quiet_fcntl(int, int command) { calls.push_back(command == F_BARRIERFSYNC ? "barrier" : "full"); return 0; }
 // A PosixIO on another volume's root, whose sync calls are recorded and never reach it.
 std::unique_ptr<j::PosixIO> volume_io(const std::filesystem::path& root, j::PosixIO::BarrierStorageCall storage) {
-	auto io = std::make_unique<j::PosixIO>(root, 0600, warned({.allow_shared_directory = true}));
+	auto io = std::make_unique<j::PosixIO>(root, warned({.flush_mode = j::FlushMode::plain, .allow_shared_directory = true}));
 	io->replace_sync_calls(&quiet_fsync, &quiet_fcntl);
 	io->replace_barrier_storage(storage);
 	return io;
@@ -240,7 +290,7 @@ std::vector<std::filesystem::path> other_volumes(const std::filesystem::path& ba
 		const std::filesystem::path root = mount_point(mounts[i]);
 		struct stat status{};
 		if (::stat(root.c_str(), &status) || std::ranges::find(seen, static_cast<std::uint64_t>(status.st_dev)) != seen.end()) { continue; }
-		try { j::PosixIO probe(root, 0600, {.allow_shared_directory = true}); } catch (const std::exception&) { continue; }
+		try { j::PosixIO probe(root, {.flush_mode = j::FlushMode::plain, .allow_shared_directory = true}); } catch (const std::exception&) { continue; }
 		seen.push_back(static_cast<std::uint64_t>(status.st_dev));
 		found.push_back(root);
 	}
@@ -254,19 +304,19 @@ std::vector<std::filesystem::path> other_volumes(const std::filesystem::path& ba
 void barrier_warning(const std::filesystem::path& base) {
 	const Log stage{"fsync:a", "fsync:b", "fsync:c"};
 	{
-		Fixture f(base / "warn-full-flush", warned({.full_flush_ordering = true}));
+		Fixture f(base / "warn-full-flush", warned({.flush_mode = j::FlushMode::full}));
 		f.io->replace_barrier_storage(&other_storage);
-		expect(run([&] { f.io->order_files_and_directory(f.all); }), cat(stage, {"fsync:" + f.dir(), "full"}), "full_flush_ordering flushes");
-		expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "full_flush_ordering flushes a directory alone");
-		check(warning_calls == 0, "full_flush_ordering never warns: no barrier ordered without flushing");
+		expect(run([&] { f.io->order_files_and_directory(f.all); }), cat(stage, {"fsync:" + f.dir(), "full"}), "full mode flushes");
+		expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "full mode flushes a directory alone");
+		check(warning_calls == 0, "full mode never warns: no barrier ordered without flushing");
 	}
-	Fixture f(base / "warn", warned());
+	Fixture f(base / "warn", warned({.flush_mode = j::FlushMode::plain}));
 	f.io->replace_barrier_storage(&other_storage);
 	const Log ordered = cat(stage, {"fsync:" + f.dir(), "barrier"});
-	expect(run([&] { f.io->sync_files_and_directory(f.all); }), cat(stage, {"fsync:" + f.dir(), "full"}), "a durable batch flushes");
-	expect(run([&] { f.io->sync_files_and_directory({}); }), {"fsync:" + f.dir(), "full"}, "an empty durable batch flushes");
-	expect(run([&] { f.io->sync_files(f.all); }), cat(stage, {"full"}), "sync_files flushes");
-	expect(run([&] { f.io->sync_directory(); }), {"fsync:" + f.dir(), "full"}, "sync_directory flushes");
+	expect(run([&] { f.io->sync_files_and_directory(f.all); }), cat(stage, {"fsync:" + f.dir()}), "a durable batch fsyncs");
+	expect(run([&] { f.io->sync_files_and_directory({}); }), {"fsync:" + f.dir()}, "an empty durable batch fsyncs");
+	expect(run([&] { f.io->sync_files(f.all); }), stage, "sync_files fsyncs");
+	expect(run([&] { f.io->sync_directory(); }), {"fsync:" + f.dir()}, "sync_directory fsyncs");
 	check(warning_calls == 0, "durable calls never warn");
 	for (int error : {ENOTSUP, EOPNOTSUPP, ENOTTY}) {
 		barrier_error = error; barrier_failures = 1;
@@ -298,7 +348,7 @@ void barrier_warning(const std::filesystem::path& base) {
 	// Once per volume: the same backend, a directory-only ordering point, and another backend on it.
 	expect(run([&] { f.io->order_files_and_directory(f.all); }), ordered, "a second ordering point");
 	expect(run([&] { f.io->order_files_and_directory({}); }), {"fsync:" + f.dir(), "barrier"}, "a directory-only ordering point");
-	Fixture g(base / "warn-again", warned());
+	Fixture g(base / "warn-again", warned({.flush_mode = j::FlushMode::plain}));
 	g.io->replace_barrier_storage(&other_storage);
 	expect(run([&] { g.io->order_files_and_directory(g.all); }), cat(stage, {"fsync:" + g.dir(), "barrier"}), "another backend orders");
 	check(warning_calls == 2 && warnings.size() == 1, "a volume warns once per process");
@@ -336,7 +386,7 @@ bool real_storage(const std::filesystem::path& base) {
 	check(storage.apple_ssd == (want == "apple"), "the storage is classified as expected");
 	std::filesystem::create_directory(base / "real");
 	std::filesystem::permissions(base / "real", std::filesystem::perms::owner_all);
-	j::PosixIO io(base / "real", 0600, warned());
+	j::PosixIO io(base / "real", warned({.flush_mode = j::FlushMode::plain}));
 	auto file = io.create_exclusive("a");
 	check(file->write_at(0, "bytes") == 5, "write");
 	j::File* group[] = {file.get()};
@@ -361,18 +411,65 @@ int main(int argc, char **argv) {
 	std::filesystem::remove_all(base);
 	std::filesystem::create_directory(base);
 	if (!real_storage(base)) { barrier_warning(base); }
-	ordering_protocol(base);
+	plain_protocol(base);
+	full_protocol(base);
+	full_refusal(base);
 	flush_target(base);
 	errno_rule(base);
-	full_flush_option(base);
 	std::cout << "sync_calls: ok\n";
 	return 0;
 }
 #else
-// Linux and FreeBSD order with the durable sequence and never call the barrier warning.
+// Linux and FreeBSD order with the durable sequence, make the same calls in both flush modes,
+// and never call the barrier warning.
 namespace {
 std::vector<std::string> calls;
-int record_fsync(int fd) { calls.push_back("fsync:" + std::to_string(fd)); return ::fsync(fd); }
+std::filesystem::path current;  // the directory under test: "dir", or the name of its entry
+std::string name_of(int fd) {
+	struct stat status{}, entry{};
+	if (::fstat(fd, &status)) { return "?"; }
+	auto same = [&](const std::filesystem::path& path) { return !::lstat(path.c_str(), &entry) && entry.st_dev == status.st_dev && entry.st_ino == status.st_ino; };
+	if (same(current)) { return "dir"; }
+	for (const auto& found : std::filesystem::directory_iterator(current)) {
+		if (same(found.path())) { return found.path().filename().string(); }
+	}
+	return "?";
+}
+int record_fsync(int fd) { calls.push_back("fsync:" + name_of(fd)); return ::fsync(fd); }
+#ifdef __linux__
+int record_fdatasync(int fd) { calls.push_back("fdatasync:" + name_of(fd)); return ::fdatasync(fd); }
+#endif
+int warnings = 0;
+// Every call site, in order; the same log in both modes is the claim.
+std::vector<std::string> sequence(const std::filesystem::path& base, j::FlushMode mode, const char* where) {
+	const auto directory = base / where;
+	std::filesystem::create_directories(directory);
+	std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
+	const j::PosixIOOptions options{.flush_mode = mode, .barrier_warning = [](void*, const j::BarrierWarning&) { ++warnings; }};
+	j::PosixIO io(directory, options);
+#ifdef __linux__
+	io.replace_sync_calls(&record_fsync, &record_fdatasync, nullptr);
+#else
+	io.replace_sync_calls(&record_fsync);
+#endif
+	current = directory;
+	calls.clear();
+	auto owner = io.acquire_owner(true);
+	std::vector<std::unique_ptr<j::File>> files;
+	std::vector<j::File*> all;
+	for (const char *name : {"a", "b", "c"}) {
+		files.push_back(io.create_exclusive(name));
+		all.push_back(files.back().get());
+	}
+	io.order_files_and_directory(all);
+	io.sync_files_and_directory(all);
+	io.sync_files(all);
+	io.order_files_and_directory({});
+	io.sync_directory();
+	files[0]->sync();
+	files[0]->sync_data();
+	return calls;
+}
 }
 int main(int argc, char **argv) {
 	if (argc != 2) {
@@ -381,32 +478,25 @@ int main(int argc, char **argv) {
 	}
 	const std::filesystem::path base(argv[1]);
 	std::filesystem::remove_all(base);
-	std::filesystem::create_directories(base / "never-warns");
-	std::filesystem::permissions(base / "never-warns", std::filesystem::perms::owner_all);
-	static int warnings = 0;
-	constexpr j::PosixIOOptions options{.barrier_warning = [](void*, const j::BarrierWarning&) { ++warnings; }};
-	j::PosixIO io(base / "never-warns", 0600, options);
-	std::vector<std::unique_ptr<j::File>> files;
-	std::vector<j::File*> all;
-	for (const char *name : {"a", "b", "c"}) {
-		files.push_back(io.create_exclusive(name));
-		all.push_back(files.back().get());
-	}
+	const auto plain = sequence(base, j::FlushMode::plain, "plain");
+	const auto full = sequence(base, j::FlushMode::full, "full");
+	// owner.lock; ordered = durable (a, b, c, dir); sync_files (a, b, c); dir; dir; File::sync; File::sync_data.
 #ifdef __linux__
-	io.replace_sync_calls(&record_fsync, nullptr);
+	const std::vector<std::string> want{"fsync:owner.lock", "fsync:a", "fsync:b", "fsync:c", "fsync:dir", "fsync:a", "fsync:b", "fsync:c", "fsync:dir",
+		"fsync:a", "fsync:b", "fsync:c", "fsync:dir", "fsync:dir", "fsync:a", "fdatasync:a"};
 #else
-	io.replace_sync_calls(&record_fsync);
+	const std::vector<std::string> want{"fsync:owner.lock", "fsync:a", "fsync:b", "fsync:c", "fsync:dir", "fsync:a", "fsync:b", "fsync:c", "fsync:dir",
+		"fsync:a", "fsync:b", "fsync:c", "fsync:dir", "fsync:dir", "fsync:a", "fsync:a"};
 #endif
-	io.order_files_and_directory(all);
-	const auto ordered = std::exchange(calls, {});
-	io.sync_files_and_directory(all);
-	const auto durable = std::exchange(calls, {});
-	io.order_files_and_directory({});
-	if (ordered != durable || ordered.size() != 4 || calls.size() != 1 || warnings != 0) {
-		std::cerr << "failed: ordering is the durable sequence and never warns\n";
+	if (plain != want || full != want || warnings != 0) {
+		std::cerr << "failed: both modes make the committed calls and never warn\n  plain:";
+		for (auto& c : plain) { std::cerr << ' ' << c; }
+		std::cerr << "\n  full:";
+		for (auto& c : full) { std::cerr << ' ' << c; }
+		std::cerr << '\n';
 		return 1;
 	}
-	std::cout << "sync_calls: ok (no barrier, no warning)\n";
+	std::cout << "sync_calls: ok (both modes the same calls, no barrier, no warning)\n";
 	return 0;
 }
 #endif

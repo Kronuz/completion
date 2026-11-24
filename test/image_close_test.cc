@@ -144,7 +144,7 @@ int main(int argc, char **argv) {
 		const std::filesystem::path directory(argv[1]);
 		check(std::filesystem::create_directory(directory));
 		std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
-		auto backend = std::make_shared<c::PosixIO>(directory);
+		auto backend = std::make_shared<c::PosixIO>(directory, {.flush_mode = c::FlushMode::full});
 		auto lock = backend->acquire_owner(true);
 		auto empty = std::make_shared<const std::string>();
 		auto bytes = std::make_shared<const std::string>("payload");

@@ -126,7 +126,7 @@ void set_injection(const Injection& injection) {
 
 // Each injected type locks, writes nothing, and is classified non-local by name.
 void warnings(const fs::path& directory) {
-	j::PosixIO io(fresh(directory));
+	j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 	(void)io.create_exclusive("meta-1");
 	io.replace_statfs(inject);
 	const Injection foreign[] = {
@@ -149,7 +149,7 @@ void warnings(const fs::path& directory) {
 		const auto before = snapshot(directory);
 		{
 			auto lock = io.acquire_directory_owner();
-			j::PosixIO other(directory);
+			j::PosixIO other(directory, {.flush_mode = j::FlushMode::full});
 			expect_busy(other, directory, "a non-local filesystem still excludes in this process");
 		}
 		check(snapshot(directory) == before, "locking writes nothing");
@@ -198,7 +198,7 @@ void base_classification(const fs::path& directory) {
 	const j::IO& base = none;
 	check(!base.directory_filesystem().local, "an IO that does not classify is not local");
 	check(base.directory_filesystem().name == "unclassified", "and says so");
-	j::PosixIO posix(directory);
+	j::PosixIO posix(directory, {.flush_mode = j::FlushMode::full});
 	const j::IO& through_base = posix;
 	check(through_base.directory_filesystem() == posix.directory_filesystem(), "PosixIO answers through the base");
 }
@@ -210,7 +210,7 @@ int enotsup_flock(int, int) {
 
 // A flock the filesystem does not support is not_supported, for the caller to decide on.
 void unsupported(const fs::path& directory) {
-	j::PosixIO io(fresh(directory));
+	j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 	io.replace_flock(enotsup_flock);
 	try {
 		auto lock = io.acquire_directory_owner();
@@ -233,7 +233,7 @@ void in_process(const fs::path& directory, const char* expect) {
 #endif
 	// create then create: an empty directory, the first holder writing its first file.
 	{
-		j::PosixIO first(fresh(directory)), second(directory);
+		j::PosixIO first(fresh(directory), {.flush_mode = j::FlushMode::full}), second(directory, {.flush_mode = j::FlushMode::full});
 		auto lock = first.acquire_directory_owner();
 		check(fs::is_empty(directory), "the lock writes nothing");
 		expect_busy(second, directory, "create then create");
@@ -246,7 +246,7 @@ void in_process(const fs::path& directory, const char* expect) {
 	}
 	// create then open, and open then open: a populated directory.
 	{
-		j::PosixIO creator(directory), opener(directory), third(directory);
+		j::PosixIO creator(directory, {.flush_mode = j::FlushMode::full}), opener(directory, {.flush_mode = j::FlushMode::full}), third(directory, {.flush_mode = j::FlushMode::full});
 		auto created = creator.acquire_directory_owner();
 		expect_busy(opener, directory, "create then open");
 		created.reset();
@@ -264,7 +264,7 @@ void in_process(const fs::path& directory, const char* expect) {
 	}
 	// The barrier needs no owner file (on macOS F_FULLFSYNC runs on the directory).
 	{
-		j::PosixIO io(directory);
+		j::PosixIO io(directory, {.flush_mode = j::FlushMode::full});
 		io.sync_directory();
 		auto lock = io.acquire_directory_owner();
 		(void)io.create_exclusive("named");
@@ -276,7 +276,7 @@ void in_process(const fs::path& directory, const char* expect) {
 // holds until stdin closes.
 int child(const std::string& mode, const fs::path& directory) {
 	try {
-		j::PosixIO io(directory);
+		j::PosixIO io(directory, {.flush_mode = j::FlushMode::full});
 		if (mode == "try") {
 			try {
 				auto lock = io.acquire_directory_owner();
@@ -328,7 +328,7 @@ int reap(Child& child) {
 }
 
 void cross_process(const char* self, const fs::path& directory) {
-	j::PosixIO io(fresh(directory));
+	j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 	// Another process tries while this one holds, before and after the first file.
 	{
 		auto lock = io.acquire_directory_owner();
@@ -349,14 +349,14 @@ void cross_process(const char* self, const fs::path& directory) {
 	char byte = 0;
 	check(::read(holder.from, &byte, 1) == 1, "the holder took the lock");
 	expect_busy(io, directory, "open while another process holds");
-	j::PosixIO fresh_io(directory);
+	j::PosixIO fresh_io(directory, {.flush_mode = j::FlushMode::full});
 	expect_busy(fresh_io, directory, "open then open across processes");
 	// The lock follows the directory's inode across a rename.
 	const auto renamed = directory.string() + ".renamed";
 	fs::remove_all(renamed);
 	fs::rename(directory, renamed);
 	{
-		j::PosixIO moved(renamed);
+		j::PosixIO moved(renamed, {.flush_mode = j::FlushMode::full});
 		expect_busy(moved, renamed, "the lock follows a renamed directory");
 	}
 	fs::rename(renamed, directory);

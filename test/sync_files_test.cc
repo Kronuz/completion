@@ -40,8 +40,9 @@ class SyncModel {
   public:
 	enum class Call { Stat, Sync, Flush, Barrier };
 	struct Fault { Call call; int fd; int error; int remaining = 1; };
-	explicit SyncModel(std::vector<dev_t> devices)
-		: devices_(std::move(devices)), staged_(devices_.size()), durable_(devices_.size()), ordered_(devices_.size()) {}
+	explicit SyncModel(std::vector<dev_t> devices, j::FlushMode flush = j::FlushMode::full)
+		: mode(flush), devices_(std::move(devices)), staged_(devices_.size()), durable_(devices_.size()), ordered_(devices_.size()) {}
+	j::FlushMode mode;  // files_sync_devices reads it, as it reads PosixIO's SyncCalls
 	int stat(int fd, struct stat* status) {
 		++stats;
 		if (fails(Call::Stat, fd)) { return -1; }
@@ -176,6 +177,32 @@ void directory_batches() {
 	j::detail::files_sync_devices(fds, 3, 3, SyncMode::ordered, interrupted);
 	check(interrupted.ordered() && interrupted.barriers == 2, "an interrupted barrier retries");
 }
+// Plain mode: a durable batch is its fsyncs alone, with no device to find or flush; an ordered
+// batch barriers the directory's device and leaves every other device at its fsync.
+void plain_batches() {
+	const std::array<int, 3> fds{0, 1, 2};
+	using j::detail::SyncMode;
+	constexpr auto plain = j::FlushMode::plain;
+	SyncModel durable({9, 3, 9}, plain);
+	j::detail::files_sync_devices(fds, durable);
+	check(durable.stats == 0 && durable.syncs == 3 && durable.full_syncs == 0 && durable.barriers == 0, "a plain durable batch is its fsyncs");
+	SyncModel with_directory({9, 3, 9, 9}, plain);
+	j::detail::files_sync_devices(fds, 3, 3, SyncMode::durable, with_directory);
+	check(with_directory.stats == 0 && with_directory.syncs == 4 && with_directory.full_syncs == 0, "a plain durable batch fsyncs the directory too");
+	SyncModel ordered({9, 3, 9, 9}, plain);
+	j::detail::files_sync_devices(fds, 3, 3, SyncMode::ordered, ordered);
+	check(ordered.syncs == 4 && ordered.barriers == 1 && ordered.full_syncs == 0, "a plain ordered batch is one barrier and no full flush");
+	check(ordered.is_ordered(0) && ordered.is_ordered(2) && ordered.is_ordered(3) && !ordered.is_ordered(1) && !ordered.is_durable(1),
+		"the directory's device is ordered and the other device keeps its fsync");
+	SyncModel failed({9, 9, 9}, plain);
+	failed.fault = SyncModel::Fault{SyncModel::Call::Sync, 1, EIO};
+	try {
+		j::detail::files_sync_devices(fds, failed);
+		check(false, "a failed fsync rejects a plain batch");
+	} catch (const std::system_error& error) {
+		check(error.code() == std::error_code(EIO, std::generic_category()), "the fsync's error survives");
+	}
+}
 // Another backend's file, which PosixIO cannot batch.
 class Counted final : public j::File {
   public:
@@ -202,11 +229,12 @@ int main(int argc, char **argv) {
 	}
 	device_barriers();
 	directory_batches();
+	plain_batches();
 	const std::filesystem::path directory(argv[1]);
 	std::filesystem::remove_all(directory);
 	std::filesystem::create_directory(directory);
 	std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
-	j::PosixIO io(directory);
+	j::PosixIO io(directory, {.flush_mode = j::FlushMode::full});
 	auto owner = io.acquire_owner(true);
 	int foreign = 0;
 	std::vector<std::unique_ptr<j::File>> files;
@@ -236,7 +264,7 @@ int main(int argc, char **argv) {
 	const auto other_directory = directory / "other";
 	std::filesystem::create_directory(other_directory);
 	std::filesystem::permissions(other_directory, std::filesystem::perms::owner_all);
-	j::PosixIO other(other_directory);
+	j::PosixIO other(other_directory, {.flush_mode = j::FlushMode::full});
 	auto other_owner = other.acquire_owner(true);
 	auto other_file = other.create_exclusive("other");
 	check(other_file->write_at(0, "other backend") == 13, "write through another POSIX backend");

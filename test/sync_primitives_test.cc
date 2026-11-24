@@ -20,10 +20,12 @@
  * THE SOFTWARE.
  */
 
-// The SyncFiles and OrderFiles primitives: the exact system-call sequence PosixIO issues on this
-// platform for each, recorded through replace_sync_calls on a real directory, the same through the
-// synchronous IO methods, drive_synchronously and the native queue's worker; read-only descriptors;
-// and what a failed call leaves undone. The expected sequences below are the committed values.
+// Every sync PosixIO issues, in each flush mode: the exact system-call sequence on this platform
+// for SyncFiles and OrderFiles, Sync, SyncData (the turn barrier), DirectorySync, File::sync,
+// File::sync_data and the owner lock file's creation, recorded through replace_sync_calls on a
+// real directory, the same through the synchronous IO methods, drive_synchronously and the native
+// queue's worker; read-only descriptors; and what a failed call leaves undone. The expected
+// sequences below are the committed values.
 #include "completion/api.h"
 #include "completion/native_completion.h"
 #include <chrono>
@@ -36,9 +38,17 @@
 #include <sys/stat.h>
 #include <system_error>
 #include <thread>
+#include <type_traits>
 #include <vector>
 
 namespace c = kronuz::io::completion;
+
+// The flush mode has no default: options without one, and a PosixIO without options, do not compile.
+template <class T> concept braced_default = requires { T{}; };
+static_assert(!braced_default<c::PosixIOOptions> && !std::is_default_constructible_v<c::PosixIOOptions>);
+static_assert(!std::is_constructible_v<c::PosixIO, std::filesystem::path>);
+static_assert(!std::is_constructible_v<c::PosixIO, std::filesystem::path, unsigned>);
+static_assert(std::is_constructible_v<c::PosixIO, std::filesystem::path, c::PosixIOOptions, unsigned>);
 
 namespace {
 void check(bool value, const char *what) {
@@ -50,6 +60,7 @@ void check(bool value, const char *what) {
 using Log = std::vector<std::string>;
 Log calls;
 std::map<std::pair<dev_t, ino_t>, std::string> names;  // the files and the directory under test, by identity
+std::filesystem::path under_test;                      // the directory whose entries name the files
 int fail_name_errno = 0;                               // fails the fsync of failing_name with this errno
 std::string failing_name;
 
@@ -57,8 +68,15 @@ std::string name_of(int fd) {
 	struct stat status{};
 	check(::fstat(fd, &status) == 0, "fd has a status");
 	auto found = names.find({status.st_dev, status.st_ino});
-	check(found != names.end(), "fd is one of the files or the directory under test");
-	return found->second;
+	if (found != names.end()) { return found->second; }
+	for (const auto &entry : std::filesystem::directory_iterator(under_test)) {
+		struct stat entry_status{};
+		if (!::lstat(entry.path().c_str(), &entry_status) && entry_status.st_dev == status.st_dev && entry_status.st_ino == status.st_ino) {
+			return names[{status.st_dev, status.st_ino}] = entry.path().filename().string();
+		}
+	}
+	check(false, "fd is one of the files or the directory under test");
+	return {};
 }
 int record_fsync(int fd) {
 	auto name = name_of(fd);
@@ -74,47 +92,63 @@ int record_fcntl(int fd, int command) {
 }
 void install(c::PosixIO &io) { io.replace_sync_calls(&record_fsync, &record_fcntl); }
 #elif defined(__linux__)
+int record_fdatasync(int fd) {
+	calls.push_back("fdatasync:" + name_of(fd));
+	return ::fdatasync(fd);
+}
 int record_writeback(int fd) {
 	calls.push_back("writeback:" + name_of(fd));
 	return kronuz::journal::detail::default_writeback(fd);
 }
-void install(c::PosixIO &io) { io.replace_sync_calls(&record_fsync, &record_writeback); }
+void install(c::PosixIO &io) { io.replace_sync_calls(&record_fsync, &record_fdatasync, &record_writeback); }
 #else
 void install(c::PosixIO &io) { io.replace_sync_calls(&record_fsync); }
 #endif
 
-// The sequences, per platform. Group is a (read-write), d (read-only), b (read-write), then the directory.
-// macOS: fsync each file and the directory, then one device flush: F_FULLFSYNC for SyncFiles, F_BARRIERFSYNC
-// for OrderFiles, through the first file on the device. Linux: writeback hints, then fsync in order. FreeBSD: fsync in order.
+// The sequences, per platform and flush mode. Group is a (read-write), d (read-only), b (read-write),
+// then the directory; failed: d fails, so a is staged, b and the directory are not attempted, and
+// no device is flushed. macOS: fsync each file and the directory, then, in full mode, one F_FULLFSYNC
+// per device for SyncFiles and OrderFiles alike, through the first file on it; in plain mode, nothing
+// more for SyncFiles and one F_BARRIERFSYNC for OrderFiles. Linux: writeback hints, then fsync in
+// order. FreeBSD: fsync in order. Linux and FreeBSD are the same in both modes.
+struct Sequences {
+	Log sync_group, order_group, sync_read_only, order_read_only, sync_empty, order_empty, failed;
+};
+Sequences sequences_for([[maybe_unused]] c::FlushMode mode) {
 #ifdef __APPLE__
-const Log sync_group{"fsync:a", "fsync:d", "fsync:b", "fsync:dir", "full:a"};
-const Log order_group{"fsync:a", "fsync:d", "fsync:b", "fsync:dir", "barrier:a"};
-const Log sync_read_only{"fsync:d", "fsync:dir", "full:d"};
-const Log order_read_only{"fsync:d", "fsync:dir", "barrier:d"};
-const Log sync_empty{"fsync:dir", "full:dir"};
-const Log order_empty{"fsync:dir", "barrier:dir"};
-// d fails: a is staged, b and the directory are not attempted, and no device is flushed.
-const Log sync_failed{"fsync:a", "fsync:d"};
-const Log order_failed{"fsync:a", "fsync:d"};
+	if (mode == c::FlushMode::full) {
+		return {{"fsync:a", "fsync:d", "fsync:b", "fsync:dir", "full:a"}, {"fsync:a", "fsync:d", "fsync:b", "fsync:dir", "full:a"},
+			{"fsync:d", "fsync:dir", "full:d"}, {"fsync:d", "fsync:dir", "full:d"}, {"fsync:dir", "full:dir"}, {"fsync:dir", "full:dir"},
+			{"fsync:a", "fsync:d"}};
+	}
+	return {{"fsync:a", "fsync:d", "fsync:b", "fsync:dir"}, {"fsync:a", "fsync:d", "fsync:b", "fsync:dir", "barrier:a"},
+		{"fsync:d", "fsync:dir"}, {"fsync:d", "fsync:dir", "barrier:d"}, {"fsync:dir"}, {"fsync:dir", "barrier:dir"},
+		{"fsync:a", "fsync:d"}};
 #elif defined(__linux__)
-const Log sync_group{"writeback:a", "writeback:d", "writeback:b", "fsync:a", "fsync:d", "fsync:b", "fsync:dir"};
-const Log order_group = sync_group;
-const Log sync_read_only{"writeback:d", "fsync:d", "fsync:dir"};
-const Log order_read_only = sync_read_only;
-const Log sync_empty{"fsync:dir"};
-const Log order_empty = sync_empty;
-const Log sync_failed{"writeback:a", "writeback:d", "writeback:b", "fsync:a", "fsync:d"};
-const Log order_failed = sync_failed;
+	const Log group{"writeback:a", "writeback:d", "writeback:b", "fsync:a", "fsync:d", "fsync:b", "fsync:dir"};
+	const Log read_only{"writeback:d", "fsync:d", "fsync:dir"};
+	return {group, group, read_only, read_only, {"fsync:dir"}, {"fsync:dir"}, {"writeback:a", "writeback:d", "writeback:b", "fsync:a", "fsync:d"}};
 #else
-const Log sync_group{"fsync:a", "fsync:d", "fsync:b", "fsync:dir"};
-const Log order_group = sync_group;
-const Log sync_read_only{"fsync:d", "fsync:dir"};
-const Log order_read_only = sync_read_only;
-const Log sync_empty{"fsync:dir"};
-const Log order_empty = sync_empty;
-const Log sync_failed{"fsync:a", "fsync:d"};
-const Log order_failed = sync_failed;
+	const Log group{"fsync:a", "fsync:d", "fsync:b", "fsync:dir"};
+	return {group, group, {"fsync:d", "fsync:dir"}, {"fsync:d", "fsync:dir"}, {"fsync:dir"}, {"fsync:dir"}, {"fsync:a", "fsync:d"}};
 #endif
+}
+// The single-file and directory call sites, with owner.lock held, per platform and flush mode.
+struct CallSites {
+	Log owner_create, sync, sync_data, sync_primitive, sync_data_primitive, directory_sync;
+};
+CallSites call_sites_for([[maybe_unused]] c::FlushMode mode) {
+#ifdef __APPLE__
+	if (mode == c::FlushMode::full) {
+		return {{"full:owner.lock"}, {"full:a"}, {"full:a"}, {"fsync:a", "full:a"}, {"full:a"}, {"fsync:dir", "full:owner.lock"}};
+	}
+	return {{"fsync:owner.lock"}, {"fsync:a"}, {"fsync:a"}, {"fsync:a"}, {"fsync:a"}, {"fsync:dir"}};
+#elif defined(__linux__)
+	return {{"fsync:owner.lock"}, {"fsync:a"}, {"fdatasync:a"}, {"writeback:a", "fsync:a"}, {"fdatasync:a"}, {"fsync:dir"}};
+#else
+	return {{"fsync:owner.lock"}, {"fsync:a"}, {"fsync:a"}, {"fsync:a"}, {"fsync:a"}, {"fsync:dir"}};
+#endif
+}
 
 void expect(const Log &got, const Log &want, const std::string &what) {
 	if (got != want) {
@@ -150,16 +184,19 @@ class OnePrimitive final : public c::Operation {
 };
 using Group = std::vector<std::shared_ptr<c::File>>;
 
+// The recorder is installed before any file opens: a file keeps the sync calls it opened with.
 struct Fixture {
 	std::filesystem::path directory;
 	std::shared_ptr<c::PosixIO> io;
 	Group everything, read_only, empty;
-	explicit Fixture(const std::filesystem::path &where) : directory(where) {
+	Fixture(const std::filesystem::path &where, c::FlushMode mode) : directory(where) {
 		names.clear();
+		under_test = directory;
 		std::filesystem::remove_all(directory);
 		std::filesystem::create_directory(directory);
 		std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
-		io = std::make_shared<c::PosixIO>(directory);
+		io = std::make_shared<c::PosixIO>(directory, c::PosixIOOptions{.flush_mode = mode});
+		install(*io);
 		for (const char *name : {"a", "d", "b"}) {
 			auto file = io->create_exclusive(name);
 			check(file->write_at(0, "bytes") == 5, "write");
@@ -177,7 +214,6 @@ struct Fixture {
 		struct stat status{};
 		check(::stat(directory.c_str(), &status) == 0, "stat directory");
 		names[{status.st_dev, status.st_ino}] = "dir";
-		install(*io);
 	}
 	std::vector<c::File *> raw(const Group &group) const {
 		std::vector<c::File *> result;
@@ -187,17 +223,26 @@ struct Fixture {
 };
 
 using Route = std::function<void(Fixture &, c::Kind, const Group &)>;
+// SyncFiles and OrderFiles take the group; Sync and SyncData its first file; DirectorySync nothing.
 c::Request request_for(c::Kind kind, const Group &group) {
 	c::Request request;
 	request.token.operation = 1;
 	request.kind = kind;
-	request.files = group;
+	if (kind == c::Kind::Sync || kind == c::Kind::SyncData) { request.file = group.at(0); }
+	else if (kind != c::Kind::DirectorySync) { request.files = group; }
 	return request;
 }
 // The IO method the primitive stands for.
 void direct(Fixture &f, c::Kind kind, const Group &group) {
 	auto files = f.raw(group);
-	if (kind == c::Kind::SyncFiles) { f.io->sync_files_and_directory(files); } else { f.io->order_files_and_directory(files); }
+	switch (kind) {
+	case c::Kind::SyncFiles: f.io->sync_files_and_directory(files); break;
+	case c::Kind::OrderFiles: f.io->order_files_and_directory(files); break;
+	case c::Kind::Sync: f.io->sync_files(std::span(files).first(1)); break;
+	case c::Kind::SyncData: f.io->sync_data_files(std::span(files).first(1)); break;
+	case c::Kind::DirectorySync: f.io->sync_directory(); break;
+	default: check(false, "a sync primitive");
+	}
 }
 void synchronous(Fixture &f, c::Kind kind, const Group &group) {
 	OnePrimitive operation(*f.io, request_for(kind, group));
@@ -216,9 +261,11 @@ void queued(Fixture &f, c::Kind kind, const Group &group) {
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-	auto stats = queue.stats();
-	const auto at = static_cast<std::size_t>(kind) - stats.native_by_primitive.size();
-	check(stats.fallback_extensions.at(at) == 1 && stats.native_extensions.at(at) == 0, "SyncFiles and OrderFiles run on the fallback worker");
+	if (kind == c::Kind::SyncFiles || kind == c::Kind::OrderFiles) {
+		auto stats = queue.stats();
+		const auto at = static_cast<std::size_t>(kind) - stats.native_by_primitive.size();
+		check(stats.fallback_extensions.at(at) == 1 && stats.native_extensions.at(at) == 0, "SyncFiles and OrderFiles run on the fallback worker");
+	}
 	if (operation->result_.error) { std::rethrow_exception(operation->result_.error); }
 }
 Log run(const Route &route, Fixture &f, c::Kind kind, const Group &group, int error = 0) {
@@ -235,24 +282,57 @@ Log run(const Route &route, Fixture &f, c::Kind kind, const Group &group, int er
 	return calls;
 }
 
-void sequences(const std::filesystem::path &base) {
-	Fixture f(base / "sequences");
+std::string mode_name(c::FlushMode mode) { return mode == c::FlushMode::full ? " (full)" : " (plain)"; }
+
+void sequences(const std::filesystem::path &base, c::FlushMode mode) {
+	Fixture f(base / "sequences", mode);
+	const auto want = sequences_for(mode);
 	const struct { const char *route; Route run; } routes[] = {{"IO method", direct}, {"drive_synchronously", synchronous}, {"native queue", queued}};
 	for (auto &route : routes) {
-		const std::string at = std::string(" through the ") + route.route;
-		expect(run(route.run, f, c::Kind::SyncFiles, f.everything), sync_group, "SyncFiles of a, d (read-only), b" + at);
-		expect(run(route.run, f, c::Kind::OrderFiles, f.everything), order_group, "OrderFiles of a, d (read-only), b" + at);
-		expect(run(route.run, f, c::Kind::SyncFiles, f.read_only), sync_read_only, "SyncFiles of a read-only file alone" + at);
-		expect(run(route.run, f, c::Kind::OrderFiles, f.read_only), order_read_only, "OrderFiles of a read-only file alone" + at);
-		expect(run(route.run, f, c::Kind::SyncFiles, f.empty), sync_empty, "SyncFiles of no files syncs the directory" + at);
-		expect(run(route.run, f, c::Kind::OrderFiles, f.empty), order_empty, "OrderFiles of no files orders the directory" + at);
-		expect(run(route.run, f, c::Kind::SyncFiles, f.everything, EIO), sync_failed, "a failed SyncFiles stops at the failing file" + at);
-		expect(run(route.run, f, c::Kind::OrderFiles, f.everything, EIO), order_failed, "a failed OrderFiles stops at the failing file" + at);
+		const std::string at = std::string(" through the ") + route.route + mode_name(mode);
+		expect(run(route.run, f, c::Kind::SyncFiles, f.everything), want.sync_group, "SyncFiles of a, d (read-only), b" + at);
+		expect(run(route.run, f, c::Kind::OrderFiles, f.everything), want.order_group, "OrderFiles of a, d (read-only), b" + at);
+		expect(run(route.run, f, c::Kind::SyncFiles, f.read_only), want.sync_read_only, "SyncFiles of a read-only file alone" + at);
+		expect(run(route.run, f, c::Kind::OrderFiles, f.read_only), want.order_read_only, "OrderFiles of a read-only file alone" + at);
+		expect(run(route.run, f, c::Kind::SyncFiles, f.empty), want.sync_empty, "SyncFiles of no files syncs the directory" + at);
+		expect(run(route.run, f, c::Kind::OrderFiles, f.empty), want.order_empty, "OrderFiles of no files orders the directory" + at);
+		expect(run(route.run, f, c::Kind::SyncFiles, f.everything, EIO), want.failed, "a failed SyncFiles stops at the failing file" + at);
+		expect(run(route.run, f, c::Kind::OrderFiles, f.everything, EIO), want.failed, "a failed OrderFiles stops at the failing file" + at);
+	}
+}
+
+// The owner lock file's creation, File::sync and File::sync_data, and the Sync, SyncData (the
+// turn barrier) and DirectorySync primitives, with owner.lock held. The native queue runs them on
+// its fallback worker on macOS; Linux's ring and FreeBSD's AIO issue the kernel's own fsync and
+// fdatasync, the same in both modes, past the seam, so they take the other two routes there.
+void call_sites(const std::filesystem::path &base, c::FlushMode mode) {
+	Fixture f(base / "call-sites", mode);
+	const auto want = call_sites_for(mode);
+	const std::string in = mode_name(mode);
+	std::unique_ptr<c::OwnerLock> owner;
+	calls.clear();
+	owner = f.io->acquire_owner(c::OwnerLockOptions{c::OwnerLockMode::both, c::OwnerFile::create_exclusive});
+	expect(calls, want.owner_create, "creating owner.lock syncs it" + in);
+	calls.clear();
+	f.everything[0]->sync();
+	expect(calls, want.sync, "File::sync" + in);
+	calls.clear();
+	f.everything[0]->sync_data();
+	expect(calls, want.sync_data, "File::sync_data" + in);
+	std::vector<std::pair<const char *, Route>> routes{{"IO method", direct}, {"drive_synchronously", synchronous}};
+#ifdef __APPLE__
+	routes.emplace_back("native queue", queued);
+#endif
+	for (auto &[route, through] : routes) {
+		const std::string at = std::string(" through the ") + route + in;
+		expect(run(through, f, c::Kind::Sync, f.everything), want.sync_primitive, "Sync of a" + at);
+		expect(run(through, f, c::Kind::SyncData, f.everything), want.sync_data_primitive, "SyncData of a, the turn barrier" + at);
+		expect(run(through, f, c::Kind::DirectorySync, f.empty), want.directory_sync, "DirectorySync flushes through owner.lock" + at);
 	}
 }
 
 void read_only_descriptor(const std::filesystem::path &base) {
-	Fixture f(base / "read-only");
+	Fixture f(base / "read-only", c::FlushMode::full);
 	bool refused = false;
 	try { f.everything[1]->write_at(0, "x"); } catch (const std::system_error &) { refused = true; }
 	check(refused, "a read-only descriptor refuses writes");
@@ -261,7 +341,7 @@ void read_only_descriptor(const std::filesystem::path &base) {
 }
 
 void invalid_group(const std::filesystem::path &base) {
-	Fixture f(base / "invalid");
+	Fixture f(base / "invalid", c::FlushMode::full);
 	Group with_null{f.everything[0], nullptr};
 	bool refused = false;
 	calls.clear();
@@ -271,7 +351,7 @@ void invalid_group(const std::filesystem::path &base) {
 
 // Every open primitive has a read-only mode: the descriptor reads and syncs, and refuses writes.
 void read_only_opens(const std::filesystem::path &base) {
-	Fixture f(base / "read-only-opens");
+	Fixture f(base / "read-only-opens", c::FlushMode::full);
 	auto writes_refused = [](c::File &file) {
 		try { file.write_at(0, "x"); } catch (const std::system_error &) { return true; }
 		return false;
@@ -315,7 +395,7 @@ void read_only_opens(const std::filesystem::path &base) {
 
 // The queue retains the operation, and so the group it names, until the original completes.
 void retention(const std::filesystem::path &base) {
-	Fixture f(base / "retention");
+	Fixture f(base / "retention", c::FlushMode::full);
 	auto group = std::make_shared<Group>(f.everything);
 	std::weak_ptr<Group> retained = group;
 	// The request views the group; the operation owns the group it views.
@@ -346,7 +426,7 @@ void retention(const std::filesystem::path &base) {
 		}
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-	expect(calls, sync_group, "the retained original syncs the group");
+	expect(calls, sequences_for(c::FlushMode::full).sync_group, "the retained original syncs the group");
 	original.reset();
 	check(retained.expired(), "completion releases the group");
 }
@@ -360,7 +440,10 @@ int main(int argc, char **argv) {
 	const std::filesystem::path base(argv[1]);
 	std::filesystem::remove_all(base);
 	std::filesystem::create_directory(base);
-	sequences(base);
+	for (c::FlushMode mode : {c::FlushMode::plain, c::FlushMode::full}) {
+		sequences(base, mode);
+		call_sites(base, mode);
+	}
 	read_only_descriptor(base);
 	invalid_group(base);
 	read_only_opens(base);

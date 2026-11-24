@@ -153,7 +153,7 @@ int main(int argc, char **argv) {
 		std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
 		const std::string long_name(255, 'x');
 		{
-			c::PosixIO io(directory);
+			c::PosixIO io(directory, {.flush_mode = c::FlushMode::full});
 			int fd = ::openat(io.native_directory_handle(), long_name.c_str(),
 							  O_CREAT | O_EXCL | O_RDWR | O_CLOEXEC, 0600);
 			check(fd >= 0);
@@ -190,7 +190,7 @@ int main(int argc, char **argv) {
 		Counts counts;
 		auto resource = std::make_shared<Resource>(counts);
 		c::AllocationContext context(resource);
-		auto io = c::make_posix_io(context, directory);
+		auto io = c::make_posix_io(context, directory, {.flush_mode = c::FlushMode::full});
 		auto queue = c::make_native_queue(context);
 		auto job =
 			std::allocate_shared<NextOperation>(c::OwnedAllocator<NextOperation>(context), context, io);

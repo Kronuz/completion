@@ -121,7 +121,7 @@ int main(int argc, char **argv) {
 		check(std::filesystem::create_directory(directory));
 		std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
 		{
-			c::PosixIO io(directory);
+			c::PosixIO io(directory, {.flush_mode = c::FlushMode::full});
 			auto cursor = io.scan_directory();
 			cursor->close();
 			rejects([&] { cursor->close(); });
@@ -139,7 +139,7 @@ int main(int argc, char **argv) {
 		for (bool fail : {false, true}) {
 			Probe probe;
 			probe.owner = std::this_thread::get_id();
-			auto backend = std::make_shared<c::PosixIO>(directory);
+			auto backend = std::make_shared<c::PosixIO>(directory, {.flush_mode = c::FlushMode::full});
 			auto queue = std::make_unique<c::NativeQueue>();
 			auto stream = ::opendir(directory.c_str());
 			check(stream != nullptr);

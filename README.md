@@ -29,9 +29,8 @@ and directory barriers make writes durable. It is the storage layer under
   group- or world-writable files, and unsafe names; creation is exclusive. The root must be
   owned and private, unless `PosixIOOptions` admits it and the host warns.
 - **Explicit durability.** File and directory barriers are separate calls, and `sync_files`
-  batches files across devices. On macOS a sync is `F_FULLFSYNC`, once per device for a batch,
-  and `order_files_and_directory` orders a publication with one `F_BARRIERFSYNC`, which Apple
-  guarantees only on Apple SSDs; `PosixIOOptions::full_flush_ordering` makes it a full flush.
+  batches files across devices. Every `PosixIO` names its flush mode, with no default; see
+  [flush modes](#-flush-modes).
 - **Zero-copy reads.** `File::map()` gives a read-only view of a whole file.
 - **Allocation-aware.** Optional PMR contexts from
   [allocators](https://github.com/Kronuz/allocators) account every control block, queue and
@@ -50,7 +49,7 @@ Write a file and make it durable through the trusted-directory backend:
 namespace c = kronuz::io::completion;
 
 int main() {
-	c::PosixIO io("data");                         // an existing private directory
+	c::PosixIO io("data", {.flush_mode = c::FlushMode::full});  // an existing private directory
 	// Exclusive across processes: the directory, then owner.lock, created once.
 	auto owner = io.acquire_owner(c::OwnerLockOptions{c::OwnerLockMode::both, c::OwnerFile::create_exclusive});
 	auto file = io.create_exclusive("record");
@@ -60,7 +59,7 @@ int main() {
 		if (n == 0) { return 1; }
 		at += n;
 	}
-	file->sync();                                  // F_FULLFSYNC on macOS
+	file->sync();                                  // F_FULLFSYNC on macOS, in full mode
 	io.sync_directory();                           // the name is durable too
 	std::puts("record is durable");               // record is durable
 }
@@ -68,6 +67,25 @@ int main() {
 
 [`examples/demo.cc`](examples/demo.cc) makes files in two directories durable with one
 `sync_files` call.
+
+## 💾 Flush modes
+
+`PosixIOOptions::flush_mode` is required: `PosixIOOptions{}` and a `PosixIO` without options do
+not compile. Every sync the backend and its files issue follows it: `File::sync`, `File::sync_data`
+(the turn barrier's `SyncData`), `sync_files`, `sync_files_and_directory`,
+`order_files_and_directory`, `sync_directory` and the creation of `owner.lock`.
+
+| Platform | `full` | `plain` |
+|---|---|---|
+| macOS | `F_FULLFSYNC` for every durable sync and ordering point (a batch: `fsync` each, then one per device) | `fsync` for durable syncs; one `F_BARRIERFSYNC` per ordering point |
+| Linux | `fsync`; `fdatasync` for `sync_data`; writeback hints before a batch | the same calls |
+| FreeBSD | `fsync` | the same calls |
+
+On macOS, `fsync` hands the data to the drive and leaves it in the drive's cache: a power loss can
+drop it, or write it out of order, even after the call returned. Only `F_FULLFSYNC` survives power
+loss there, so `plain` survives an application or kernel crash, not a power loss. `F_BARRIERFSYNC` orders without flushing, and Apple guarantees the order only on Apple SSDs.
+`plain` matches Xapiand's write-ahead log on macOS. In `full` mode an unsupported or failing
+`F_FULLFSYNC` fails the call; it never falls back to `fsync`.
 
 ## 📦 Installation
 
@@ -109,6 +127,8 @@ Not for:
 
 - [ARCHITECTURE.md](ARCHITECTURE.md): the ownership contract, the backend, owner locks,
   directory trust, image jobs, scanning, leases, reusable controls and the drivers.
+- [docs/mechanisms/flush-mode.md](docs/mechanisms/flush-mode.md): the flush mode every sync
+  follows, and what survives a crash or a power loss in each.
 - [docs/mechanisms/commit-barriers.md](docs/mechanisms/commit-barriers.md): one flush and one
   ordering point per commit on macOS.
 - [docs/PLATFORM_FINDINGS.md](docs/PLATFORM_FINDINGS.md): what durability and reclamation cost

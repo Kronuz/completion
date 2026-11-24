@@ -46,7 +46,7 @@ int main(int argc, char** argv) {
 		const int rounds = static_cast<int>(integer_argument(argc, argv, 2, 50));
 		if (rounds < 1) { std::cerr << "usage: completion_dirflush_probe [DIRECTORY [ROUNDS]]\n"; return 2; }
 		ScratchDirectory scratch(parent);
-		j::PosixIO io(scratch.path());
+		j::PosixIO io(scratch.path(), {.flush_mode = j::FlushMode::full});
 		const int directory = ::open(scratch.path().c_str(), O_RDONLY | O_DIRECTORY);
 		if (directory < 0) { throw std::runtime_error("open directory"); }
 

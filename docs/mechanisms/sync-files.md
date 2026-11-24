@@ -22,11 +22,12 @@ A publication that creates N files and wants one group sync for them does not ru
 
 | Platform | `SyncFiles` (durable) | `OrderFiles` (ordered) | Calls, in order |
 |---|---|---|---|
-| macOS | Every file's data and the directory's entries, through one `F_FULLFSYNC` per device. | Every file and the directory are staged ahead of any later write by one `F_BARRIERFSYNC` on the directory's device; not necessarily durable. Other devices are flushed in full; `PosixIOOptions::full_flush_ordering` makes it a full flush. | `fsync` each file, `fsync` the directory, then the device flush through the first file on the device. |
-| Linux | Every file (fsync: data and the metadata to read it back) and the directory entries, each as the filesystem's fsync makes them durable. On ext4 and XFS with write barriers that is a device flush per fsync: N+1 flushes, nothing amortized (unmeasured). | The same as `SyncFiles`; durable is stronger than ordered. | `sync_file_range(WRITE)` hint on each file, `fsync` each file, `fsync` the directory. |
-| FreeBSD | As Linux: the filesystem's fsync per file, then the directory. | The same as `SyncFiles`. | `fsync` each file, `fsync` the directory. |
+| macOS, full mode | Every file's data and the directory's entries, through one `F_FULLFSYNC` per device. | The same as `SyncFiles`. | `fsync` each file, `fsync` the directory, then `F_FULLFSYNC` through the first file on each device. |
+| macOS, plain mode | Every file and the directory as far as `fsync` takes them: the drive's cache, not the media. | Every file and the directory are staged ahead of any later write by one `F_BARRIERFSYNC` on the directory's device; not necessarily durable. Other devices keep their `fsync`. | `fsync` each file, `fsync` the directory; `OrderFiles` then `F_BARRIERFSYNC` through the first file on the directory's device. |
+| Linux, both modes | Every file (fsync: data and the metadata to read it back) and the directory entries, each as the filesystem's fsync makes them durable. On ext4 and XFS with write barriers that is a device flush per fsync: N+1 flushes, nothing amortized (unmeasured). | The same as `SyncFiles`; durable is stronger than ordered. | `sync_file_range(WRITE)` hint on each file, `fsync` each file, `fsync` the directory. |
+| FreeBSD, both modes | As Linux: the filesystem's fsync per file, then the directory. | The same as `SyncFiles`. | `fsync` each file, `fsync` the directory. |
 
-An empty group syncs the directory alone (macOS: `fsync`, then `F_FULLFSYNC` or `F_BARRIERFSYNC` through the directory).
+An empty group syncs the directory alone (macOS: `fsync`, then `F_FULLFSYNC` in full mode, or `F_BARRIERFSYNC` for `OrderFiles` in plain mode, through the owner file when held, else the directory).
 
 ## What an error means
 

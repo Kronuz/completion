@@ -19,7 +19,7 @@ UFS with soft updates (VM, virtio), and macOS 27 arm64 APFS (M1 Pro) where noted
 ## 1. Make many files durable with one flush per device: `IO::sync_files`
 
 A durable commit that syncs each new file separately pays one device flush per file.
-On macOS `File::sync` is `F_FULLFSYNC`, which flushes the drive's whole cache, so the
+On macOS `File::sync` in full mode is `F_FULLFSYNC`, which flushes the drive's whole cache, so the
 cost is the flush count, not the bytes.
 
 The probe (`bench/sync_probe.cc`, `completion_sync_probe DIRECTORY 9 15`): N new files of 200 KB written, made durable, then a
@@ -86,6 +86,11 @@ rename; 30 interleaved rounds, median, macOS x86_64 APFS, on an otherwise idle m
 | Temporary ordered | 2 full, 1 barrier | 45.1 ms | 48.9 ms |
 | One ordering point | 1 full, 1 barrier | 24.9 ms | 27.9 ms |
 
+These patterns predate the flush modes (`docs/mechanisms/flush-mode.md`): the last row mixed a barrier with a final
+full flush, which neither mode issues now. The probe now runs "Before", "Directory folded in" and "One ordering
+point" in full mode (4, 3 and 2 full flushes) and "Ordering point, plain" in plain mode (1 barrier, no full flush);
+those numbers are not measured yet.
+
 Strata's T11 bulk load (20000 documents, five interleaved rounds): wall time 3.39 s to 2.90 s (docs/s 5897 to 6898,
 17% more), and the profile's engine row, which counts the flush wait as busy, falls 0.205 to 0.163 ms per document
 (see the Xapiand note `docs/perf/t11-barriers/README.md`). Whole-process CPU per document is unchanged within noise
@@ -102,8 +107,8 @@ flush. So the ordering holds on an internal Apple SSD; on external or third-part
 and virtual disks, what APFS does with the call is undocumented, and if it degrades to a plain `fsync` a power loss
 can leave a visible manifest whose files are not on the media (strata then refuses to open the index rather than
 serving wrong data; acknowledged commits stay durable through the final `F_FULLFSYNC`). Hosts that cannot vouch for
-their storage set `PosixIOOptions::full_flush_ordering`: `order_files_and_directory` then issues `F_FULLFSYNC`
-where it would issue the barrier. The default stays the barrier. `PosixIOOptions::barrier_warning` is called once
+their storage build their `PosixIO` in full flush mode: `order_files_and_directory` then issues `F_FULLFSYNC`
+where plain mode issues the barrier, and plain mode issues no full flush at all. `PosixIOOptions::barrier_warning` is called once
 per volume per process after the first barrier that ordered without flushing on storage IOKit does not identify as
 an internal Apple SSD (`docs/mechanisms/barriers.md`).
 

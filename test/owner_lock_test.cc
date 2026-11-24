@@ -155,7 +155,7 @@ bool excludes(Mode first, Mode second) {
 // once it holds and holds until stdin closes.
 int child(const std::string& action, int index, const fs::path& directory) {
 	try {
-		j::PosixIO io(directory);
+		j::PosixIO io(directory, {.flush_mode = j::FlushMode::full});
 		const auto& holder = holders[index];
 		if (action == "try") {
 			switch (attempt(io, holder, directory)) {
@@ -261,7 +261,7 @@ void matrix(const char* self, const fs::path& directory, Topology topology) {
 				auto after = spawn(self, "try", b, directory);
 				check(outcome_of(reap(after)) == Outcome::acquired, "a released lock is free to the competitor");
 			} else {
-				j::PosixIO io(directory), other_io(directory), third(directory);
+				j::PosixIO io(directory, {.flush_mode = j::FlushMode::full}), other_io(directory, {.flush_mode = j::FlushMode::full}), third(directory, {.flush_mode = j::FlushMode::full});
 				j::IO& competitor = topology == Topology::shared ? static_cast<j::IO&>(io) : other_io;
 				auto lock = acquire(io, first, directory);
 				const auto before = snapshot(directory);
@@ -292,7 +292,7 @@ void bootstrap(const fs::path& directory) {
 	const auto mask = ::umask(0);
 	for (auto options : {j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive},
 			 j::OwnerLockOptions::legacy_file(true)}) {
-		j::PosixIO io(fresh(directory));
+		j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 		auto lock = io.acquire_owner(options);
 		const auto after = snapshot(directory);
 		check(after.entries.size() == 1 && after.entries.at("owner.lock") == 0, "a create adds one empty owner.lock");
@@ -302,12 +302,12 @@ void bootstrap(const fs::path& directory) {
 	::umask(mask);
 	for (auto options : {j::OwnerLockOptions{Mode::directory, j::OwnerFile::open_existing},
 			 j::OwnerLockOptions::legacy_directory()}) {
-		j::PosixIO io(fresh(directory));
+		j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 		const auto before = snapshot(directory);
 		auto lock = io.acquire_owner(options);
 		check(snapshot(directory) == before, "a directory lock writes nothing");
 	}
-	j::PosixIO io(fresh(directory));
+	j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 	const auto before = snapshot(directory);
 	check(throws<std::invalid_argument>([&] {
 		(void)io.acquire_owner(j::OwnerLockOptions{Mode::directory, j::OwnerFile::create_exclusive});
@@ -325,7 +325,7 @@ void bootstrap(const fs::path& directory) {
 // no_such_file_or_directory, and either unwinds the directory lock it took.
 void create_and_recover(const char* self, const fs::path& directory) {
 	const j::OwnerLockOptions create{Mode::both, j::OwnerFile::create_exclusive}, recover{Mode::both, j::OwnerFile::open_existing};
-	j::PosixIO io(fresh(directory)), other(directory);
+	j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full}), other(directory, {.flush_mode = j::FlushMode::full});
 	const int fds = lowest_fd();
 	check(error_of([&] { (void)io.acquire_owner(recover); }) == std::errc::no_such_file_or_directory, "recover before create");
 	check(fs::is_empty(directory), "a failed recover writes nothing");
@@ -374,18 +374,18 @@ void inject(j::PosixIO& io, Injection value) {
 	io.replace_flock(injected_flock);
 }
 bool directory_free(const fs::path& directory) {
-	j::PosixIO probe(directory);
+	j::PosixIO probe(directory, {.flush_mode = j::FlushMode::full});
 	return attempt(probe, holders[3], directory) == Outcome::acquired;
 }
 bool file_free(const fs::path& directory) {
-	j::PosixIO probe(directory);
+	j::PosixIO probe(directory, {.flush_mode = j::FlushMode::full});
 	return attempt(probe, holders[1], directory) == Outcome::acquired;
 }
 
 // A failed step releases what earlier steps took and leaves the IO able to lock again.
 void partial_failure(const fs::path& directory) {
 	const j::OwnerLockOptions create{Mode::both, j::OwnerFile::create_exclusive}, recover{Mode::both, j::OwnerFile::open_existing};
-	j::PosixIO io(fresh(directory));
+	j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 	const int fds = lowest_fd();
 	for (int error : {EIO, ENOLCK, EWOULDBLOCK}) {
 		inject(io, {.file_errno = error});
@@ -408,7 +408,7 @@ void partial_failure(const fs::path& directory) {
 	}
 	io.replace_flock(nullptr);
 	// The directory step fails first: no owner.lock is opened or created.
-	j::PosixIO empty(fresh(directory));
+	j::PosixIO empty(fresh(directory), {.flush_mode = j::FlushMode::full});
 	const int empty_fds = lowest_fd();
 	for (int error : {EIO, EWOULDBLOCK}) {
 		inject(empty, {.directory_errno = error});
@@ -421,7 +421,7 @@ void partial_failure(const fs::path& directory) {
 
 // EINTR is retried at either step; a busy answer behind EINTR is still busy.
 void interrupted(const fs::path& directory) {
-	j::PosixIO io(fresh(directory)), other(directory);
+	j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full}), other(directory, {.flush_mode = j::FlushMode::full});
 	inject(io, {.directory_eintr = 3, .file_eintr = 2});
 	{
 		auto lock = io.acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive});
@@ -443,7 +443,7 @@ void interrupted(const fs::path& directory) {
 // A directory lock the filesystem does not support fails closed in every mode that needs
 // it: no file-only fallback, nothing created. The file-only mode is the caller's choice.
 void unsupported(const fs::path& directory) {
-	j::PosixIO io(fresh(directory));
+	j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 	for (int error : {ENOTSUP, EOPNOTSUPP}) {
 		inject(io, {.directory_errno = error});
 		check(error_of([&] { (void)io.acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive}); }) ==
@@ -464,7 +464,7 @@ void unsupported(const fs::path& directory) {
 // it locks or writes anything, so no second, independently releasable handle exists.
 void aliases(const fs::path& directory) {
 	{
-		j::PosixIO io(fresh(directory));
+		j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 		auto lock = io.acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive});
 		const auto before = snapshot(directory);
 		for (const auto& holder : holders) {
@@ -476,7 +476,7 @@ void aliases(const fs::path& directory) {
 		auto again = io.acquire_owner(j::OwnerLockOptions{});
 	}
 	{
-		j::PosixIO io(fresh(directory));
+		j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 		auto lock = io.acquire_directory_owner();
 		check(attempt(io, holders[4], directory) == Outcome::refused, "both over a held directory lock");
 		check(fs::is_empty(directory) && !directory_free(directory), "nothing created, the directory still held");
@@ -486,7 +486,7 @@ void aliases(const fs::path& directory) {
 	// The legacy pairing through one IO: two locks on two inodes, each released by its own
 	// (the unsafe control again, in one process).
 	{
-		j::PosixIO io(fresh(directory));
+		j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 		auto file = io.acquire_owner(true);
 		auto both = attempt(io, holders[4], directory);
 		check(both == Outcome::refused, "both over a held file lock");
@@ -504,7 +504,7 @@ void concurrent(const fs::path& directory) {
 	constexpr int iterations = 300;
 	for (const auto mode : {Mode::both, Mode::directory, Mode::file}) {
 		for (int i = 0; i < iterations; ++i) {
-			j::PosixIO io(fresh(directory));
+			j::PosixIO io(fresh(directory), {.flush_mode = j::FlushMode::full});
 			{ auto seed = io.acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive}); }
 			std::atomic<int> ready{0}, acquired{0};
 			std::unique_ptr<j::OwnerLock> locks[2];
@@ -570,7 +570,7 @@ void base(const fs::path& directory) {
 	}
 	check(legacy.calls == 0, "and never reaches the legacy call");
 	check(throws<std::logic_error>([&] { (void)io.acquire_directory_owner(); }), "the base directory call is unchanged");
-	j::PosixIO posix(fresh(directory));
+	j::PosixIO posix(fresh(directory), {.flush_mode = j::FlushMode::full});
 	WrapperIO wrapper(posix);
 	auto lock = static_cast<j::IO&>(wrapper).acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive});
 	check(!directory_free(directory) && !file_free(directory), "a forwarding wrapper excludes in both");
@@ -585,7 +585,7 @@ void lifetime(const fs::path& directory) {
 		~Owner() { lock.reset(); }
 	};
 	fresh(directory);
-	auto io = std::make_shared<j::PosixIO>(directory);
+	auto io = std::make_shared<j::PosixIO>(directory, {.flush_mode = j::FlushMode::full});
 	auto owner = std::make_shared<Owner>();
 	owner->io = io;
 	owner->lock = io->acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive});
@@ -598,7 +598,7 @@ void lifetime(const fs::path& directory) {
 		io.reset();
 		job->submitted();
 		auto original = j::detail::execute_primitive(job->io(), job->request());
-		j::PosixIO competitor(directory);
+		j::PosixIO competitor(directory, {.flush_mode = j::FlushMode::full});
 		for (const auto& holder : holders) {
 			check(attempt(competitor, holder, directory) == Outcome::busy, "busy while the original is outstanding");
 		}
@@ -606,7 +606,7 @@ void lifetime(const fs::path& directory) {
 		c::drive_synchronously(*job);
 		if (job->error()) { std::rethrow_exception(job->error()); }
 	}
-	j::PosixIO competitor(directory);
+	j::PosixIO competitor(directory, {.flush_mode = j::FlushMode::full});
 	for (const auto& holder : holders) {
 		check(attempt(competitor, holder, directory) == Outcome::acquired, "free once the job is gone");
 	}
@@ -618,7 +618,7 @@ void refusals(const fs::path& directory) {
 	const j::OwnerLockOptions recover{Mode::both, j::OwnerFile::open_existing};
 	const auto target = directory.string() + ".target";
 	auto expect_refused = [&](const char* what) {
-		j::PosixIO io(directory);
+		j::PosixIO io(directory, {.flush_mode = j::FlushMode::full});
 		const auto before = snapshot(directory);
 		const int fds = lowest_fd();
 		check(throws<std::exception>([&] { (void)io.acquire_owner(recover); }), what);
@@ -633,7 +633,7 @@ void refusals(const fs::path& directory) {
 	expect_refused("a symlinked owner.lock");
 	check(fs::file_size(target) == 1, "its target untouched");
 	fresh(directory);
-	{ j::PosixIO io(directory); auto lock = io.acquire_owner(true); }
+	{ j::PosixIO io(directory, {.flush_mode = j::FlushMode::full}); auto lock = io.acquire_owner(true); }
 	fs::create_hard_link(directory / "owner.lock", directory / "alias");
 	expect_refused("a hard-linked owner.lock");
 	fs::remove(directory / "alias");
@@ -648,15 +648,15 @@ void refusals(const fs::path& directory) {
 	const fs::path link = directory.string() + ".link";
 	fs::remove(link);
 	fs::create_directory_symlink(directory, link);
-	check(throws<std::system_error>([&] { j::PosixIO refused(link); }), "a symlinked root is refused");
+	check(throws<std::system_error>([&] { j::PosixIO refused(link, {.flush_mode = j::FlushMode::full}); }), "a symlinked root is refused");
 	{
-		j::PosixIO followed(link, 0600, {.follow_root_symlink = true});
+		j::PosixIO followed(link, {.flush_mode = j::FlushMode::full, .follow_root_symlink = true});
 		auto lock = followed.acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive});
 		check(!directory_free(directory) && !file_free(directory), "a followed root locks its target");
 	}
 	fs::remove(link);
 	fs::permissions(directory, fs::perms::owner_all | fs::perms::group_write);
-	check(throws<std::runtime_error>([&] { j::PosixIO refused(directory); }), "a shared-writable root is refused");
+	check(throws<std::runtime_error>([&] { j::PosixIO refused(directory, {.flush_mode = j::FlushMode::full}); }), "a shared-writable root is refused");
 	fs::permissions(directory, fs::perms::owner_all);
 }
 } // namespace

@@ -162,7 +162,7 @@ void posix_file(const std::filesystem::path &base, const char *route_name, Route
 	std::filesystem::remove_all(directory);
 	std::filesystem::create_directory(directory);
 	std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
-	c::PosixIO io(directory);
+	c::PosixIO io(directory, {.flush_mode = c::FlushMode::full});
 	std::shared_ptr<c::File> file = io.create_exclusive("turn-log");
 	WriteThenSyncData operation(io, file, "durable");
 	route(io, operation);
@@ -192,7 +192,7 @@ void native_ring(const std::filesystem::path &base) {
 	std::filesystem::remove_all(directory);
 	std::filesystem::create_directory(directory);
 	std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
-	c::PosixIO io(directory);
+	c::PosixIO io(directory, {.flush_mode = c::FlushMode::full});
 	std::shared_ptr<c::File> file = io.create_exclusive("turn-log");
 	kronuz::journal::LinuxCompletionHooks hooks;
 	hooks.inspect = &inspect_hook;
@@ -241,7 +241,7 @@ int main(int argc, char **argv) {
 	std::filesystem::remove_all(base);
 	std::filesystem::create_directory(base);
 	std::filesystem::permissions(base, std::filesystem::perms::owner_all);
-	c::PosixIO io(base);
+	c::PosixIO io(base, {.flush_mode = c::FlushMode::full});
 	foreign_file(io, "drive_synchronously", inline_route);
 	foreign_file(io, "native queue", queue_route);
 	posix_file(base, "drive_synchronously", inline_route);

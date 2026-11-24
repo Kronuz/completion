@@ -6,6 +6,28 @@ entries are dated.
 
 Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://github.com/Kronuz/cpp-libraries/blob/main/docs/UPGRADING-2026-10.md#completion) lists what changes for callers, how to find affected inputs, the commits not to pin, and the speedup.
 
+## 2026-11-24
+
+### Changed (breaking)
+
+- **`PosixIOOptions::flush_mode`** (`FlushMode::plain` or `FlushMode::full`) is required and
+  replaces `PosixIOOptions::full_flush_ordering`, which is gone. `FlushMode` has no default, so
+  `PosixIOOptions{}` and `PosixIO(directory)` no longer compile; the field is first, so positional
+  options gain it in front (`{FlushMode::plain, true, true}`).
+- The constructors and `make_posix_io` take the options before the artifact mode, which keeps its
+  `0600` default: `PosixIO(directory, options, mode)` and
+  `make_posix_io(context, directory, options, mode)`.
+- On macOS every sync follows the mode. `full`: `F_FULLFSYNC` for `File::sync`, `File::sync_data`,
+  the creation of `owner.lock`, each device of a batch and `sync_directory`, and for
+  `order_files_and_directory` (what `full_flush_ordering` did). `plain`: `fsync` for all of those
+  and one `F_BARRIERFSYNC` per ordering point; nothing it returns is promised to survive a power
+  loss. Before, durable syncs were always `F_FULLFSYNC` and ordering points `F_BARRIERFSYNC`,
+  a sequence neither mode issues now. Linux and FreeBSD make the same calls as before in both
+  modes. Full mode never falls back to `fsync`: a failed `F_FULLFSYNC` fails the call.
+- `PosixIO::replace_sync_calls` covers `File::sync`, `File::sync_data` and the owner lock file,
+  through the files opened after it is set; on Linux it takes `fdatasync` too:
+  `replace_sync_calls(fsync, fdatasync, writeback)`.
+
 ## 2026-11-17
 
 ### Added

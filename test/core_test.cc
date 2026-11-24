@@ -71,7 +71,7 @@ int main(int argc, char **argv) {
 			throw std::runtime_error("test directory already exists");
 		std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
 		{
-			c::PosixIO io(directory, 0644);
+			c::PosixIO io(directory, {.flush_mode = c::FlushMode::full}, 0644);
 			auto owner = io.acquire_owner(true);
 			if ((std::filesystem::status(directory / "owner.lock").permissions() &
 				 std::filesystem::perms::mask) !=
@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
 		}
 		std::filesystem::remove(directory / "owner.lock");
 		{
-			auto io = std::make_shared<c::PosixIO>(directory);
+			auto io = std::make_shared<c::PosixIO>(directory, {.flush_mode = c::FlushMode::full});
 			auto owner = std::shared_ptr<c::OwnerLock>(io->acquire_owner(true));
 			auto bytes = std::make_shared<const std::string>(65537, 'x');
 			c::Token token;

@@ -13,7 +13,7 @@ int main(int argc, char** argv) {
 		return 2;
 	}
 	try {
-		kronuz::journal::PosixIO first(argv[1]), second(argv[2]);
+		kronuz::journal::PosixIO first(argv[1], {.flush_mode = kronuz::journal::FlushMode::full}), second(argv[2], {.flush_mode = kronuz::journal::FlushMode::full});
 		auto first_owner = first.acquire_owner(true);
 		auto second_owner = second.acquire_owner(true);
 		auto a = first.create_exclusive("batch-example");

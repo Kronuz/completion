@@ -1,25 +1,24 @@
-> Status: CURRENT (2026-11-09) the macOS ordering barrier of `PosixIO`, its warning and its opt-in full flush. Source chapter for the Architecture and Design book, beside section 5.1 (`commit-barriers.md`).
+> Status: CURRENT (2026-11-24) the macOS ordering barrier of `PosixIO` in plain flush mode, its warning, and full mode, which issues none. Source chapter for the Architecture and Design book, beside section 5.1 (`commit-barriers.md`).
 
 # The ordering barrier: what it guarantees, and where it warns
 
-`order_files_and_directory` issues `F_BARRIERFSYNC` on macOS where a durable batch would issue `F_FULLFSYNC` (`commit-barriers.md`). The barrier orders; it is not a flush. Its order is guaranteed only on Apple SSDs. `PosixIO` reports each volume where it ordered on other storage, once per process, and `full_flush_ordering` replaces the barrier with a full flush for hosts that cannot vouch for their storage. The default stays the barrier (owner, 2026-10-29, D10; lead, 2026-10-30, D16).
+In plain flush mode, `order_files_and_directory` issues `F_BARRIERFSYNC` on macOS where full mode issues `F_FULLFSYNC` (`commit-barriers.md`, `flush-mode.md`). The barrier orders; it is not a flush. Its order is guaranteed only on Apple SSDs. `PosixIO` reports each volume where it ordered on other storage, once per process; a host that cannot vouch for its storage builds its `PosixIO` in full mode. The mode is the caller's, with no default (owner, 2026-10-29, D10; 2026-11-24, Xapiand PLAN D177).
 
 Linux and FreeBSD issue no barrier: there `order_files_and_directory` is `sync_files_and_directory`, every call is a durable `fsync`, and the warning is never called.
 
 ## What the barrier guarantees
 
 - **It orders.** `fcntl(2)` documents `F_BARRIERFSYNC` as: I/O `fsync`'d before it persists before I/O issued after it, and "no assumption should be made on what has been persisted or not when this call returns". When it returns, nothing is promised to be on the media.
-- **It is not a flush.** Durability comes from the `F_FULLFSYNC` in the `sync_directory` that ends every acknowledged commit. An acknowledged commit is durable on any storage that honors a cache flush, whatever the barrier did.
+- **It is not a flush.** Plain mode has no flush after it: `sync_directory` is an `fsync`, so an acknowledged commit sits in the drive's cache until the drive writes it, and survives an application or kernel crash, not a power loss. Full mode issues no barrier: every ordering point and `sync_directory` is an `F_FULLFSYNC`, and an acknowledged commit is durable on any storage that honors a cache flush.
 - **The order holds only on Apple SSDs.** Apple documents the call as implemented on HFS and APFS and requiring hardware support "which Apple SSDs are guaranteed to provide". On external or third-party drives, Fusion or AppleRAID sets, disk images and virtual disks, what the call does is undocumented. If it degrades to a plain `fsync`, a power loss before the final flush can leave a renamed manifest on the media whose files are not: strata then refuses to open the index rather than serve wrong data.
 
 What is durable after each call of one commit, on any storage:
 
-| Call | Durable when it returns |
-|---|---|
-| `order_files_and_directory(files + temporary)` | Nothing promised by the barrier; on an Apple SSD, everything it fsynced reaches the media before anything issued after it. A barrier that fell back to a full flush, or `full_flush_ordering`, makes the call durable. |
-| `replace(temporary, manifest)` | Nothing promised. |
-| `sync_directory()` | Every file, the temporary and the rename: `fsync` on the directory, then `F_FULLFSYNC` on the directory's device (through the owner file when one is held). |
-| The same, with `full_flush_ordering` | `order_files_and_directory` is already durable: one `F_FULLFSYNC` where the barrier would be. |
+| Call | Plain mode | Full mode |
+|---|---|---|
+| `order_files_and_directory(files + temporary)` | Nothing promised by the barrier; on an Apple SSD, everything it fsynced reaches the media before anything issued after it. A barrier that fell back to a full flush makes the call durable. | Durable: one `F_FULLFSYNC` per device. |
+| `replace(temporary, manifest)` | Nothing promised. | Nothing promised. |
+| `sync_directory()` | Nothing promised against power loss: `fsync` on the directory, which leaves it in the drive's cache. | Every file, the temporary and the rename: `fsync` on the directory, then `F_FULLFSYNC` on the directory's device (through the owner file when one is held). |
 
 ## How the warning works
 
@@ -31,14 +30,14 @@ What is durable after each call of one commit, on any storage:
 
 On this host's internal SSD the classification reads `APPLE SSD AP1024M (PCI-Express, Internal)` and nothing warns; on APFS, HFS+, exFAT and FAT32 disk images it reads `Disk Image (Virtual Interface, File)` and the first barrier warns (`PLATFORM_FINDINGS.md`, "Where the barrier warns").
 
-## The opt-in full flush
+## Full mode
 
-`PosixIOOptions::full_flush_ordering` (default `false`) makes `order_files_and_directory` the durable sequence: every file and the directory fsynced, then one `F_FULLFSYNC` per device. It costs one full flush per commit, about 20 ms on this host's SSD (`commit-barriers.md`, "Numbers"). strata exposes it as an index option and passes the warning to its host (quest `barrier-warning-strata`); Xapiand names its switch in the warning it logs (quest `barrier-warning`).
+`PosixIOOptions::flush_mode = FlushMode::full` makes `order_files_and_directory` the durable sequence: every file and the directory fsynced, then one `F_FULLFSYNC` per device, and every other sync an `F_FULLFSYNC` too. Its ordering point costs a full flush, about 20 ms on this host's SSD (`commit-barriers.md`, "Numbers"). strata passes the warning to its host (quest `barrier-warning-strata`); Xapiand names its switch in the warning it logs (quest `barrier-warning`).
 
 ## Invariants
 
-- The default sequence is unchanged: `SyncFiles`, `OrderFiles` and `PreparationFilePolicy::Stage` issue the same calls with or without a callback; the warning adds no sync call.
-- The warning fires only after a barrier returned 0 on the directory's device; never on Linux or FreeBSD, never with `full_flush_ordering`.
+- `SyncFiles`, `OrderFiles` and `PreparationFilePolicy::Stage` issue the same calls with or without a callback; the warning adds no sync call.
+- The warning fires only after a barrier returned 0 on the directory's device; never on Linux or FreeBSD, never in full mode.
 - A volume is classified at most once per process while its warning is delivered or it is an Apple SSD.
 - Classification fails toward warning: whatever cannot be identified as an internal Apple SSD warns.
 
@@ -51,4 +50,4 @@ On this host's internal SSD the classification reads `APPLE SSD AP1024M (PCI-Exp
 
 ## Code
 
-`include/completion/posix.h`: `BarrierStorage`, `BarrierWarning`, `BarrierWarningCall`, `PosixIOOptions::barrier_warning`, `barrier_warning_context` and `full_flush_ordering`, `SyncCalls::barrier`, `files_sync_devices`, `detail::AppleRegistry`, `detail::barrier_storage`, `PosixIO::note_barrier_volume`, the seam `PosixIO::replace_barrier_storage`. Tests: `test/sync_calls_test.cc` (`barrier_warning`, `real_storage` with `COMPLETION_EXPECT_STORAGE`, `full_flush_option`, and on Linux and FreeBSD the never-warns run).
+`include/completion/posix.h`: `BarrierStorage`, `BarrierWarning`, `BarrierWarningCall`, `PosixIOOptions::barrier_warning`, `barrier_warning_context` and `flush_mode`, `SyncCalls::barrier`, `files_sync_devices`, `detail::AppleRegistry`, `detail::barrier_storage`, `PosixIO::note_barrier_volume`, the seam `PosixIO::replace_barrier_storage`. Tests: `test/sync_calls_test.cc` (`barrier_warning`, `real_storage` with `COMPLETION_EXPECT_STORAGE`, `full_protocol`, and on Linux and FreeBSD the never-warns run).

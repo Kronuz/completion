@@ -3,13 +3,14 @@
 # SPDX-License-Identifier: MIT
 """Mutation check of the owner lock and the SyncFiles and OrderFiles primitives.
 
-Applies each of 24 small breaks to the owner-lock, sync and staging code (include/completion/posix.h, io.h, image.h)
+Applies each of 29 small breaks to the owner-lock, sync and staging code (include/completion/posix.h, posix_sync.h, io.h, image.h)
 in a scratch copy of the repository, rebuilds the CTest suite, runs it, and requires the
 outcome to be the one expected: the suite fails (the mutant is killed) or, for the mutants
 whose break nothing can observe, passes (it survives). m1 to m14 are the ones the CL-2 review
 (docs/reviews/cl-2-code.md, finding CL2-5) listed; s1 to s8 break the sync primitives and the read-only opens (the device
 flush, the ordering barrier, the directory sync, a file's fsync, which primitive runs, the read-only flag); t1 and t2 break the
-Stage policy of image preparation (the stop before the sync, the close after a failure). Each is an exact-anchor replacement
+Stage policy of image preparation (the stop before the sync, the close after a failure); f1 to f5 break the flush mode
+(plain issuing F_FULLFSYNC, full issuing fsync, full falling back to fsync). Each is an exact-anchor replacement
 that must match exactly once.
 
   python3 tools/mutants.py                run all, in a copy under the temp directory
@@ -64,7 +65,7 @@ FILE_STEP = lines(
     '\t\t\towner->hold_file(open_file("owner.lock", create));',
     '\t\t\tlock_exclusive(owner->fd(), "lock journal owner", "files");',
     '\t\t\towner_fd_.store(owner->fd());',
-    '\t\t\tif (create) { detail::file_sync(owner->fd()); }',
+    '\t\t\tif (create) { detail::file_sync(owner->fd(), sync_calls_); }',
     '\t\t}')
 FILE_CLAIM = '\t\tif (file && !owner->claim_file()) { throw std::logic_error("journal directory already owned"); }'
 DIRECTORY_CLAIM = '\t\tif (directory && !owner->claim_directory()) { throw std::logic_error("journal directory already locked"); }'
@@ -110,9 +111,8 @@ MUTANTS = [
            expect="survived",
            why="release order is liveness only (a both contender sees a spurious busy); nothing observes it"),
     Mutant("m9", "no file sync after create", POSIX,
-           '\t\t\tif (create) { detail::file_sync(owner->fd()); }', '',
-           expect="survived",
-           why="durability of the created owner.lock is unobservable without a sync seam"),
+           '\t\t\tif (create) { detail::file_sync(owner->fd(), sync_calls_); }', '',
+           why="sync_primitives_test records the created owner.lock's sync in both flush modes"),
     Mutant("m10", "owner descriptor leaked on release", POSIX,
            lines('\t\t\t\tio_.owner_fd_.compare_exchange_strong(expected, -1);', '\t\t\t\t::close(fd_);'),
            '\t\t\t\tio_.owner_fd_.compare_exchange_strong(expected, -1);',
@@ -158,6 +158,30 @@ MUTANTS = [
                  '\t\tif (result < 0) { system_failure("durably sync journal file"); }'),
            expect={"Darwin": "survived", "default": "killed"},
            why="Linux and FreeBSD only: files_sync is their per-file fsync loop; macOS stages through files_sync_devices"),
+    Mutant("f1", "plain mode keeps F_FULLFSYNC for a file's sync", POSIX_SYNC,
+           '\tconst bool full = calls.mode == FlushMode::full;\n\tdo { result = full ?',
+           '\tconst bool full = true;\n\tdo { result = full ?',
+           expect={"Darwin": "killed", "default": "survived"},
+           why="sync_primitives_test call_sites (plain) records fsync for File::sync, sync_data and owner.lock; only macOS reads the mode"),
+    Mutant("f2", "plain mode keeps F_FULLFSYNC in sync_directory", POSIX,
+           '\t\tif (sync_calls_.mode != FlushMode::full) { return; }\n', '',
+           expect={"Darwin": "killed", "default": "survived"},
+           why="sync_primitives_test call_sites (plain) records DirectorySync as the directory fsync alone"),
+    Mutant("f3", "full mode issues fsync for a file's sync", POSIX_SYNC,
+           '\tconst bool full = calls.mode == FlushMode::full;\n\tdo { result = full ?',
+           '\tconst bool full = false;\n\tdo { result = full ?',
+           expect={"Darwin": "killed", "default": "survived"},
+           why="sync_primitives_test call_sites (full) records F_FULLFSYNC for File::sync, sync_data and owner.lock"),
+    Mutant("f4", "full mode skips a batch's device flush", POSIX_SYNC,
+           '\tif (fds.empty() && directory < 0) { return false; }\n\tconst bool full = calls.mode == FlushMode::full;',
+           '\tif (fds.empty() && directory < 0) { return false; }\n\tconst bool full = false;',
+           why="sync_files_test models a full-mode batch's device flushes on every platform"),
+    Mutant("f5", "full mode falls back to fsync where F_FULLFSYNC is unsupported", POSIX_SYNC,
+           '\tdo { result = full ? calls.full_sync(fd) : calls.sync(fd); } while (result < 0 && errno == EINTR);\n',
+           '\tdo { result = full ? calls.full_sync(fd) : calls.sync(fd); } while (result < 0 && errno == EINTR);\n'
+           '\tif (result < 0 && full && (errno == ENOTSUP || errno == EOPNOTSUPP || errno == ENOTTY)) { result = calls.sync(fd); }\n',
+           expect={"Darwin": "killed", "default": "survived"},
+           why="sync_calls_test full_refusal requires every call site to fail with the full flush's errno"),
     Mutant("s7", "Open ignores read_only", OPERATION,
            '\t\t\tresult.file = request.read_only ? io.open_existing_read_only(request.source) : io.open_existing(request.source);',
            '\t\t\tresult.file = io.open_existing(request.source);',

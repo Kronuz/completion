@@ -195,7 +195,7 @@ void posix(const std::filesystem::path &base) {
 	std::filesystem::remove_all(directory);
 	std::filesystem::create_directories(directory);
 	std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
-	c::PosixIO io(directory);
+	c::PosixIO io(directory, {.flush_mode = c::FlushMode::full});
 	auto file = io.create_exclusive("data");
 	check(file->write_at(0, "durable") == 7, "write before sync_data_files");
 	Log log;

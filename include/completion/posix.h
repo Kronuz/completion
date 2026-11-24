@@ -54,19 +54,17 @@
 
 namespace kronuz::journal {
 
-// How strictly PosixIO trusts the directory it is given. The defaults refuse; either option
-// admits what it names and PosixIO::directory_trust() reports what was found.
+// How PosixIO syncs, and how strictly it trusts the directory it is given. The flush mode is
+// required; the trust defaults refuse, either option admits what it names and
+// PosixIO::directory_trust() reports what was found.
 struct PosixIOOptions {
+	FlushMode flush_mode;                 // every sync PosixIO and its files issue follows it
 	bool follow_root_symlink = false;     // open through a final-component symlink; the descriptor is then held
 	bool allow_shared_directory = false;  // admit a foreign owner and group/other-writable mode
-	// macOS: order_files_and_directory flushes in full (F_FULLFSYNC) instead of issuing
-	// F_BARRIERFSYNC, whose ordering Apple guarantees only on Apple SSDs. Other platforms
-	// already flush in full.
-	bool full_flush_ordering = false;
 	// macOS: called once per volume per process, after the first barrier that ordered without
 	// flushing on storage other than an internal Apple SSD, on the thread of that ordering call.
 	// An exception fails the call after its barrier, and the volume warns again. Never called
-	// elsewhere or with full_flush_ordering. `barrier_warning_context` is its first argument.
+	// elsewhere or in full mode. `barrier_warning_context` is its first argument.
 	BarrierWarningCall barrier_warning = nullptr;
 	void* barrier_warning_context = nullptr;
 };
@@ -77,15 +75,15 @@ public:
 	// Trusted ancestors are a caller precondition. By default a final-component
 	// symlink, a foreign owner, and a group/other-writable mode are rejected here;
 	// `options` admits them (see directory_trust to warn). Entries stay no-follow.
-	explicit PosixIO(const std::filesystem::path& directory, unsigned artifact_mode = 0600, PosixIOOptions options = {})
-		: PosixIO(kronuz::io::completion::AllocationContext{}, directory, artifact_mode, options) {}
+	explicit PosixIO(const std::filesystem::path& directory, PosixIOOptions options, unsigned artifact_mode = 0600)
+		: PosixIO(kronuz::io::completion::AllocationContext{}, directory, options, artifact_mode) {}
 	PosixIO(kronuz::io::completion::AllocationContext context, const std::filesystem::path& directory,
-		unsigned artifact_mode = 0600, PosixIOOptions options = {})
-		: context_(std::move(context)),
+		PosixIOOptions options, unsigned artifact_mode = 0600)
+		: context_(std::move(context)), sync_calls_{options.flush_mode},
 #ifdef __APPLE__
 		  barrier_warning_(options.barrier_warning), barrier_warning_context_(options.barrier_warning_context),
 #endif
-		  artifact_mode_(artifact_mode), full_flush_ordering_(options.full_flush_ordering) {
+		  artifact_mode_(artifact_mode) {
 		if (artifact_mode != 0600 && artifact_mode != 0640 && artifact_mode != 0644) {
 			throw std::invalid_argument("unsupported artifact permissions");
 		}
@@ -147,16 +145,18 @@ public:
 	// A test seam: the flock answer every owner-lock step reports; null is flock.
 	void replace_flock(FlockCall call) noexcept { flock_ = call ? call : &::flock; }
 	// A test seam: the system calls the sync paths issue on this platform; null is the system
-	// call. Call before any sync. macOS: fsync and fcntl (F_FULLFSYNC, F_BARRIERFSYNC); Linux:
-	// fsync and the sync_file_range writeback hint; elsewhere: fsync.
+	// call. Call before opening the files it should see: a file keeps the calls it opened with.
+	// macOS: fsync and fcntl (F_FULLFSYNC, F_BARRIERFSYNC); Linux: fsync, fdatasync and the
+	// sync_file_range writeback hint; elsewhere: fsync.
 #ifdef __APPLE__
 	void replace_sync_calls(detail::FsyncCall fsync_call, detail::FcntlCall fcntl_call) noexcept {
 		sync_calls_.fsync_call = fsync_call ? fsync_call : &::fsync;
 		sync_calls_.fcntl_call = fcntl_call ? fcntl_call : &detail::default_fcntl;
 	}
 #elif defined(__linux__)
-	void replace_sync_calls(detail::FsyncCall fsync_call, detail::WritebackCall writeback_call) noexcept {
+	void replace_sync_calls(detail::FsyncCall fsync_call, detail::FsyncCall fdatasync_call, detail::WritebackCall writeback_call) noexcept {
 		sync_calls_.fsync_call = fsync_call ? fsync_call : &::fsync;
+		sync_calls_.fdatasync_call = fdatasync_call ? fdatasync_call : &::fdatasync;
 		sync_calls_.writeback_call = writeback_call ? writeback_call : &detail::default_writeback;
 	}
 #else
@@ -262,12 +262,12 @@ public:
 		sync_directory();
 #endif
 	}
-	// macOS: fsync everything, then one barrier on the directory's device (full flushes on any
-	// other device the files sit on); the sync_directory that follows the publication flushes.
-	// With PosixIOOptions::full_flush_ordering the barrier is a full flush.
+	// macOS: fsync everything, then, in plain mode, one barrier on the directory's device; in full
+	// mode, one full flush per device, as sync_files_and_directory.
 	void order_files_and_directory(std::span<File* const> files) override {
 #ifdef __APPLE__
-		const bool ordered_only = sync_staged(files, full_flush_ordering_ ? detail::SyncMode::durable : detail::SyncMode::ordered);
+		const bool full = sync_calls_.mode == FlushMode::full;
+		const bool ordered_only = sync_staged(files, full ? detail::SyncMode::durable : detail::SyncMode::ordered);
 		if (ordered_only && barrier_warning_ && !barrier_noted_.load(std::memory_order_relaxed)) { note_barrier_volume(); }
 #else
 		sync_files_and_directory(files);
@@ -278,8 +278,9 @@ public:
 		do { result = sync_calls_.sync(directory_); } while (result < 0 && errno == EINTR);
 		if (result < 0) { detail::system_failure("sync journal directory"); }
 #ifdef __APPLE__
-		// Directory fsync establishes namespace ordering; fullsync then asks the storage
-		// device to flush its cache, through the owner file when held, else the directory.
+		// Directory fsync establishes namespace ordering; in full mode, fullsync then asks the
+		// storage device to flush its cache, through the owner file when held, else the directory.
+		if (sync_calls_.mode != FlushMode::full) { return; }
 		const int owner = owner_fd_.load();
 		do { result = sync_calls_.full_sync(owner >= 0 ? owner : directory_); } while (result < 0 && errno == EINTR);
 		if (result < 0) { detail::system_failure("durably sync journal file"); }
@@ -358,7 +359,7 @@ private:
 #endif
 	class ReusableFile : public detail::PosixFile {
 	public:
-		explicit ReusableFile(const PosixIO& io) : detail::PosixFile(-1), owner(io.instance_) {}
+		explicit ReusableFile(const PosixIO& io) : detail::PosixFile(-1, io.sync_calls_), owner(io.instance_) {}
 		const std::uint64_t owner;
 	};
 	class ReusableCursor : public detail::PosixCursor {
@@ -418,7 +419,7 @@ private:
 			owner->hold_file(open_file("owner.lock", create));
 			lock_exclusive(owner->fd(), "lock journal owner", "files");
 			owner_fd_.store(owner->fd());
-			if (create) { detail::file_sync(owner->fd()); }
+			if (create) { detail::file_sync(owner->fd(), sync_calls_); }
 		}
 		return owner;
 	}
@@ -463,7 +464,7 @@ private:
 		return fd;
 	}
 	std::unique_ptr<File> file(std::string_view name, bool create, bool read_only = false) {
-		auto result = control<detail::PosixFile>(-1);
+		auto result = control<detail::PosixFile>(-1, sync_calls_);
 		result->install(open_file(name, create, read_only));
 		return result;
 	}
@@ -492,13 +493,12 @@ private:
 #endif
 	dev_t device_{};
 	unsigned artifact_mode_ = 0600;
-	bool full_flush_ordering_ = false;
 };
 
 inline std::shared_ptr<PosixIO> make_posix_io(kronuz::io::completion::AllocationContext context,
-	const std::filesystem::path& directory, unsigned artifact_mode = 0600, PosixIOOptions options = {}) {
+	const std::filesystem::path& directory, PosixIOOptions options, unsigned artifact_mode = 0600) {
 	return std::allocate_shared<PosixIO>(kronuz::io::completion::OwnedAllocator<PosixIO>(context),
-		context, directory, artifact_mode, options);
+		context, directory, options, artifact_mode);
 }
 
 } // namespace kronuz::journal

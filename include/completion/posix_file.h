@@ -128,7 +128,8 @@ private:
 };
 class PosixFile : public File {
 public:
-	explicit PosixFile(int fd) : fd_(fd) {}
+	// Syncs through `calls`, the flush mode and sync calls of the backend that opens it.
+	PosixFile(int fd, const SyncCalls& calls) : fd_(fd), calls_(calls) {}
 	~PosixFile() override { if (fd_ >= 0) { ::close(fd_); } }
 	void install(int fd) noexcept { fd_ = fd; }
 	// Trusted completion backend only. The owning File lease retains this FD.
@@ -158,8 +159,8 @@ public:
 		do { result = ::ftruncate(fd_, checked_offset(size)); } while (result < 0 && errno == EINTR);
 		if (result < 0) { system_failure("truncate journal tail"); }
 	}
-	void sync() override { file_sync(fd_); }
-	void sync_data() override { file_sync_data(fd_); }
+	void sync() override { file_sync(fd_, calls_); }
+	void sync_data() override { file_sync_data(fd_, calls_); }
 	EntryInspection inspect() override {
 		struct stat status{};
 		if (::fstat(fd_, &status)) { system_failure("inspect held file"); }
@@ -344,6 +345,7 @@ private:
 		PosixMapping& operator=(const PosixMapping&) = delete;
 	};
 	int fd_;
+	SyncCalls calls_;
 	bool lease_ = false;
 };
 } // namespace detail

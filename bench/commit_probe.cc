@@ -5,7 +5,8 @@
 
 // The probe behind docs/PLATFORM_FINDINGS.md ("Fewer flushes per commit") and
 // docs/mechanisms/commit-barriers.md: one commit shape per pattern, a set of 200 KB data
-// files and a manifest temporary published by rename, made durable four ways. The commit
+// files and a manifest temporary published by rename, made durable four ways, each on a
+// PosixIO in the flush mode it names (one per mode on the same directory). The commit
 // (from the first sync to the directory barrier after the rename) is timed, the writes
 // are not. Every round runs each pattern once, rotating the start, on fresh files.
 //
@@ -26,6 +27,7 @@ constexpr std::uint64_t kManifestBytes = 4 * 1024;
 struct Pattern {
 	const char* name;
 	const char* flushes;
+	j::FlushMode mode;
 	void (*commit)(j::IO&, Batch& data, j::File& temporary);
 };
 
@@ -49,14 +51,6 @@ void directory_folded(j::IO& io, Batch& data, j::File& temporary) {
 	publish(io);
 }
 
-// The temporary is ordered by a barrier instead of flushed.
-void temporary_ordered(j::IO& io, Batch& data, j::File& temporary) {
-	io.sync_files_and_directory(data.pointers());
-	j::File* files[] = {&temporary};
-	io.order_files_and_directory(files);
-	publish(io);
-}
-
 // One ordering point for the data files, the directory and the temporary.
 void one_ordering_point(j::IO& io, Batch& data, j::File& temporary) {
 	auto files = data.pointers();
@@ -66,10 +60,10 @@ void one_ordering_point(j::IO& io, Batch& data, j::File& temporary) {
 }
 
 const Pattern kPatterns[] = {
-	{"Before", "4 full", before},
-	{"Directory folded in", "3 full", directory_folded},
-	{"Temporary ordered", "2 full, 1 barrier", temporary_ordered},
-	{"One ordering point", "1 full, 1 barrier", one_ordering_point},
+	{"Before", "4 full", j::FlushMode::full, before},
+	{"Directory folded in", "3 full", j::FlushMode::full, directory_folded},
+	{"One ordering point", "2 full", j::FlushMode::full, one_ordering_point},
+	{"Ordering point, plain", "1 barrier", j::FlushMode::plain, one_ordering_point},
 };
 constexpr std::size_t kPatternCount = sizeof kPatterns / sizeof *kPatterns;
 } // namespace
@@ -83,7 +77,8 @@ int main(int argc, char** argv) {
 		if (counts.empty()) { counts = {3, 9}; }
 		if (rounds < 1) { std::cerr << "usage: completion_commit_probe [DIRECTORY [ROUNDS [FILES...]]]\n"; return 2; }
 		ScratchDirectory scratch(parent);
-		j::PosixIO io(scratch.path());
+		j::PosixIO full(scratch.path(), {.flush_mode = j::FlushMode::full});
+		j::PosixIO plain(scratch.path(), {.flush_mode = j::FlushMode::plain});
 
 		std::vector<std::vector<std::vector<double>>> times(counts.size(), std::vector<std::vector<double>>(kPatternCount));
 		std::cout << "data files of " << kDataBytes / 1024 << " KB and a manifest temporary in "
@@ -92,6 +87,7 @@ int main(int argc, char** argv) {
 			for (std::size_t c = 0; c < counts.size(); ++c) {
 				for (std::size_t p = 0; p < kPatternCount; ++p) {
 					const std::size_t index = (p + static_cast<std::size_t>(round)) % kPatternCount;
+					j::PosixIO& io = kPatterns[index].mode == j::FlushMode::full ? full : plain;
 					auto data = make_batch(io, "data", counts[c], kDataBytes);
 					auto temporary = io.create_exclusive("MANIFEST.tmp");
 					fill(*temporary, kManifestBytes);

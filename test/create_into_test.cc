@@ -68,7 +68,7 @@ class Resource final : public std::pmr::memory_resource {
 class FaultIO final : public c::IO {
   public:
 	FaultIO(c::AllocationContext context, const std::filesystem::path &directory)
-		: backend(c::make_posix_io(context, directory)) {}
+		: backend(c::make_posix_io(context, directory, {.flush_mode = c::FlushMode::full})) {}
 	std::unique_ptr<c::OwnerLock> acquire_owner(bool create) override {
 		return backend->acquire_owner(create);
 	}
@@ -125,7 +125,7 @@ int main(int argc, char **argv) {
 		auto resource = std::make_shared<Resource>();
 		c::AllocationContext context(resource);
 		{
-			auto io = c::make_posix_io(context, directory);
+			auto io = c::make_posix_io(context, directory, {.flush_mode = c::FlushMode::full});
 			auto lock = io->acquire_owner(true);
 			auto lease = std::make_shared<int>(1);
 			auto payload = std::make_shared<const std::string>("sealed payload");
@@ -140,7 +140,7 @@ int main(int argc, char **argv) {
 				check(jobs[at]->request().kind == c::Kind::CreateInto && jobs[at]->request().file);
 			}
 			auto reusable = io->make_closed_file();
-			auto other = c::make_posix_io(context, directory);
+			auto other = c::make_posix_io(context, directory, {.flush_mode = c::FlushMode::full});
 			const auto calls = resource->calls, capacity = resource->bytes;
 			resource->refusing = true;
 			rejects([&] { other->create_exclusive_into("foreign-control", *reusable); });

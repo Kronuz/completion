@@ -140,7 +140,7 @@ int main(int argc, char** argv) {
 		const int chunk_kib = argc > 4 ? std::atoi(argv[4]) : 64;
 		probe::ScratchDirectory scratch(parent);
 		Run run;
-		run.io = std::make_unique<j::PosixIO>(scratch.path());
+		run.io = std::make_unique<j::PosixIO>(scratch.path(), {.flush_mode = j::FlushMode::full});
 		run.chunk.assign(static_cast<std::size_t>(chunk_kib) * 1024, 'b');
 		run.turn.assign(4096, 't');
 		// The turn lane is the arm's setting: a driver that honors it admits a turn's primitive ahead of waiting Bulk ones.

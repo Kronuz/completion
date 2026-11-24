@@ -325,7 +325,7 @@ bool add_acl(int fd) {
 }
 
 void acl_and_mode(const std::filesystem::path &directory) {
-	j::PosixIO io(directory, 0644);
+	j::PosixIO io(directory, {.flush_mode = j::FlushMode::full}, 0644);
 	{
 		auto file = io.create_exclusive("plain-acl");
 		check(!file->inspect().extended_acl, "a fresh file carries no extended ACL");
@@ -358,7 +358,7 @@ int main(int argc, char **argv) {
 	std::filesystem::create_directory(directory);
 	std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
 	defaults();
-	j::PosixIO io(directory);
+	j::PosixIO io(directory, {.flush_mode = j::FlushMode::full});
 	auto owner = io.acquire_owner(true);
 	std::string bytes;
 	for (int i = 0; i < 3 * 4096 + 17; ++i) { bytes.push_back(char('a' + i % 26)); }

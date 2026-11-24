@@ -55,16 +55,17 @@ template <class F> bool refuses(F&& open) {
 }
 // Opens `path` under `options`; refused by default, admitted by exactly `admit`.
 bool opens(const fs::path& path, j::PosixIOOptions options) {
-	return !refuses([&] { j::PosixIO io(path, 0600, options); });
+	return !refuses([&] { j::PosixIO io(path, options); });
 }
 j::DirectoryTrust trust_of(const fs::path& path, j::PosixIOOptions options) {
-	j::PosixIO io(path, 0600, options);
+	j::PosixIO io(path, options);
 	const j::IO& base = io;
 	check(base.directory_trust() == io.directory_trust(), "PosixIO answers through the base");
 	return io.directory_trust();
 }
 
-constexpr j::PosixIOOptions none{}, follow{true, false}, shared{false, true}, both{true, true};
+constexpr auto plain = j::FlushMode::plain;
+constexpr j::PosixIOOptions none{plain}, follow{plain, true, false}, shared{plain, false, true}, both{plain, true, true};
 
 struct UnknownIO final : j::IO {
 	std::unique_ptr<j::OwnerLock> acquire_owner(bool) override { throw std::logic_error("unused"); }
@@ -87,7 +88,7 @@ void clean(const fs::path& root) {
 		check(trust.known && trust.trusted() && !trust.symlinked_root && !trust.foreign_owner && !trust.shared_writable,
 			"and is reported trusted");
 	}
-	j::PosixIO with_context(kronuz::io::completion::AllocationContext{}, dir, 0600, both);
+	j::PosixIO with_context(kronuz::io::completion::AllocationContext{}, dir, both);
 	check(with_context.directory_trust().trusted(), "the allocation-context constructor takes the options");
 }
 
@@ -105,14 +106,14 @@ void symlinked_root(const fs::path& root) {
 	fs::create_directory_symlink(target, link);
 	check(!opens(link, none), "a symlinked root is refused by default");
 	check(!opens(link, shared), "allow_shared_directory does not admit a symlink");
-	try { j::PosixIO io(link); check(false, "unreachable"); } catch (const std::system_error&) {}
+	try { j::PosixIO io(link, none); check(false, "unreachable"); } catch (const std::system_error&) {}
 	check(opens(link, follow) && opens(link, both), "follow_root_symlink admits it");
 	const auto trust = trust_of(link, follow);
 	check(trust.known && trust.symlinked_root && trust.trusted(), "and reports it symlinked, otherwise trusted");
 	check(!trust_of(target, follow).symlinked_root, "a plain root with the option is not symlinked");
 
 	// The descriptor is held: retargeting the link afterwards moves nothing.
-	j::PosixIO io(link, 0600, follow);
+	j::PosixIO io(link, follow);
 	const auto other = fresh(root / "other");
 	fs::remove(link);
 	fs::create_directory_symlink(other, link);
@@ -135,7 +136,7 @@ void symlinked_root(const fs::path& root) {
 	// Entries inside the directory stay no-follow.
 	const auto inner = fresh(root / "inner");
 	fs::create_symlink(root / "file", inner / "entry");
-	j::PosixIO inside(root / "inner", 0600, both);
+	j::PosixIO inside(root / "inner", both);
 	check(refuses([&] { (void)inside.open_existing("entry"); }), "a symlink entry is refused under both options");
 }
 
@@ -159,7 +160,7 @@ void shared_writable(const fs::path& root) {
 		check(through.symlinked_root && through.shared_writable, name);
 		fs::remove(link);
 		check(opens(dir, shared), "an admitted directory is usable");
-		{ j::PosixIO io(dir, 0600, shared); io.create_exclusive("a.bin")->close(); }
+		{ j::PosixIO io(dir, shared); io.create_exclusive("a.bin")->close(); }
 	}
 	fs::remove_all(root / "shared");
 }

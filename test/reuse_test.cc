@@ -134,7 +134,7 @@ int main(int argc, char **argv) {
 		auto resource = std::make_shared<Resource>();
 		c::AllocationContext context(resource);
 		{
-			auto backend = c::make_posix_io(context, directory);
+			auto backend = c::make_posix_io(context, directory, {.flush_mode = c::FlushMode::full});
 			check(backend->managed_capabilities().complete());
 			{
 				auto file = backend->create_exclusive("anchor");
@@ -209,7 +209,7 @@ int main(int argc, char **argv) {
 		check(resource->bytes == 0);
 		resource->refusing = false;
 		{
-			c::PosixIO first(directory), second(directory);
+			c::PosixIO first(directory, {.flush_mode = c::FlushMode::full}), second(directory, {.flush_mode = c::FlushMode::full});
 			auto file = first.make_closed_file();
 			auto cursor = first.make_closed_cursor();
 			rejects([&] { second.open_existing_into("anchor", *file); });
@@ -230,11 +230,11 @@ int main(int argc, char **argv) {
 		}
 		{
 			alignas(c::PosixIO) std::array<std::byte, sizeof(c::PosixIO)> storage;
-			auto first = std::construct_at(reinterpret_cast<c::PosixIO *>(storage.data()), directory);
+			auto first = std::construct_at(reinterpret_cast<c::PosixIO *>(storage.data()), directory, c::PosixIOOptions{.flush_mode = c::FlushMode::full});
 			auto file = first->make_closed_file();
 			auto cursor = first->make_closed_cursor();
 			std::destroy_at(first);
-			auto second = std::construct_at(reinterpret_cast<c::PosixIO *>(storage.data()), directory);
+			auto second = std::construct_at(reinterpret_cast<c::PosixIO *>(storage.data()), directory, c::PosixIOOptions{.flush_mode = c::FlushMode::full});
 			rejects([&] { second->open_existing_into("anchor", *file); });
 			rejects([&] { second->scan_directory_into(*cursor); });
 			std::destroy_at(second);

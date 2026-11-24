@@ -43,6 +43,7 @@ using OwnerFile = kronuz::journal::OwnerFile;
 using OwnerLockOptions = kronuz::journal::OwnerLockOptions;
 using PosixIO = kronuz::journal::PosixIO;
 using PosixIOOptions = kronuz::journal::PosixIOOptions;
+using FlushMode = kronuz::journal::FlushMode;
 using BarrierWarning = kronuz::journal::BarrierWarning;
 using BarrierStorage = kronuz::journal::BarrierStorage;
 using BarrierWarningCall = kronuz::journal::BarrierWarningCall;

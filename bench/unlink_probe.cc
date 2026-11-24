@@ -133,7 +133,7 @@ int main(int argc, char** argv) {
 		if (mib < 1 || step < kMiB) { std::cerr << "usage: completion_unlink_probe [DIRECTORY [MIB [STEP_MIB]]]\n"; return 2; }
 		const std::uint64_t bytes = mib * kMiB;
 		ScratchDirectory scratch(parent);
-		j::PosixIO io(scratch.path());
+		j::PosixIO io(scratch.path(), {.flush_mode = j::FlushMode::full});
 
 		std::printf("unlink of a synced %llu MiB file in %s\n", static_cast<unsigned long long>(mib), parent.string().c_str());
 		for (int run = 0; run < 3; ++run) {

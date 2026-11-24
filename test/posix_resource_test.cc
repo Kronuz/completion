@@ -73,7 +73,7 @@ int main(int argc, char **argv) {
 		std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
 		Counts counts;
 		auto resource = std::make_shared<Resource>(counts);
-		auto io = c::make_posix_io(c::AllocationContext(resource), directory);
+		auto io = c::make_posix_io(c::AllocationContext(resource), directory, {.flush_mode = c::FlushMode::full});
 		const auto baseline = counts.used;
 		check(baseline > 0 && counts.calls == 1);
 		struct Failing {

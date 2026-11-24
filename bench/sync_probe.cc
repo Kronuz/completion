@@ -98,7 +98,7 @@ int main(int argc, char** argv) {
 		kFileBytes = integer_argument(argc, argv, 4, 200) * 1024;
 		if (files < 1 || rounds < 1) { std::cerr << "usage: completion_sync_probe [DIRECTORY [FILES [ROUNDS [FILE_KB]]]]\n"; return 2; }
 		ScratchDirectory scratch(parent);
-		j::PosixIO io(scratch.path());
+		j::PosixIO io(scratch.path(), {.flush_mode = j::FlushMode::full});
 		const int directory = ::open(scratch.path().c_str(), O_RDONLY | O_DIRECTORY);
 		if (directory < 0) { throw std::runtime_error("open directory"); }
 
