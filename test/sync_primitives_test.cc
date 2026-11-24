@@ -50,22 +50,6 @@ static_assert(!std::is_constructible_v<c::PosixIO, std::filesystem::path>);
 static_assert(!std::is_constructible_v<c::PosixIO, std::filesystem::path, unsigned>);
 static_assert(std::is_constructible_v<c::PosixIO, std::filesystem::path, c::PosixIOOptions, unsigned>);
 
-// sync_call, the one table from a site and a mode to the call, on every platform's row.
-namespace table {
-using kronuz::journal::sync_call;
-using Site = kronuz::journal::SyncSite;
-using Call = kronuz::journal::SyncCall;
-using Platform = kronuz::journal::SyncPlatform;
-constexpr auto full = c::FlushMode::full, plain = c::FlushMode::plain;
-static_assert(sync_call(Site::file, full, Platform::macos) == Call::full_fsync && sync_call(Site::data, full, Platform::macos) == Call::full_fsync &&
-	sync_call(Site::directory, full, Platform::macos) == Call::full_fsync && sync_call(Site::order, full, Platform::macos) == Call::full_fsync);
-static_assert(sync_call(Site::file, plain, Platform::macos) == Call::fsync && sync_call(Site::data, plain, Platform::macos) == Call::fsync &&
-	sync_call(Site::directory, plain, Platform::macos) == Call::fsync && sync_call(Site::order, plain, Platform::macos) == Call::barrier_fsync);
-static_assert(sync_call(Site::data, full, Platform::linux_kernel) == Call::fdatasync && sync_call(Site::data, plain, Platform::linux_kernel) == Call::fdatasync);
-static_assert(sync_call(Site::file, full, Platform::linux_kernel) == Call::fsync && sync_call(Site::directory, plain, Platform::linux_kernel) == Call::fsync &&
-	sync_call(Site::order, full, Platform::linux_kernel) == Call::fsync);
-static_assert(sync_call(Site::data, full, Platform::other) == Call::fsync && sync_call(Site::order, plain, Platform::other) == Call::fsync);
-} // namespace table
 
 namespace {
 void check(bool value, const char *what) {
@@ -318,6 +302,26 @@ void sequences(const std::filesystem::path &base, c::FlushMode mode) {
 	}
 }
 
+// sync_call, the one table from a site and a mode to the call, on every platform's row. Checked
+// at run time, so a mutant of a row builds and fails here.
+void table_rows() {
+	using kronuz::journal::sync_call;
+	using Site = kronuz::journal::SyncSite;
+	using Call = kronuz::journal::SyncCall;
+	using Platform = kronuz::journal::SyncPlatform;
+	const auto full = c::FlushMode::full, plain = c::FlushMode::plain;
+	for (auto site : {Site::file, Site::data, Site::directory, Site::order}) {
+		check(sync_call(site, full, Platform::macos) == Call::full_fsync, "macOS full is F_FULLFSYNC at every site");
+		check(sync_call(site, plain, Platform::macos) == (site == Site::order ? Call::barrier_fsync : Call::fsync),
+			"macOS plain is fsync, and F_BARRIERFSYNC at an ordering point");
+		for (auto mode : {full, plain}) {
+			check(sync_call(site, mode, Platform::linux_kernel) == (site == Site::data ? Call::fdatasync : Call::fsync),
+				"Linux is fsync, and fdatasync for sync_data, in both modes");
+			check(sync_call(site, mode, Platform::other) == Call::fsync, "elsewhere fsync, in both modes");
+		}
+	}
+}
+
 // The owner lock file's creation, File::sync and File::sync_data, and the Sync, SyncData (the
 // turn barrier) and DirectorySync primitives, with owner.lock held. The native queue runs them on
 // its fallback worker on macOS; Linux's ring and FreeBSD's AIO issue the kernel's own fsync and
@@ -457,6 +461,7 @@ int main(int argc, char **argv) {
 	const std::filesystem::path base(argv[1]);
 	std::filesystem::remove_all(base);
 	std::filesystem::create_directory(base);
+	table_rows();
 	for (c::FlushMode mode : {c::FlushMode::plain, c::FlushMode::full}) {
 		sequences(base, mode);
 		call_sites(base, mode);
