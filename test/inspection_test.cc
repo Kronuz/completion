@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
 		std::filesystem::path directory(argv[1]);
 		check(std::filesystem::create_directory(directory));
 		std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
-		auto io = std::make_shared<c::PosixIO>(directory, {.flush_mode = c::FlushMode::full});
+		auto io = std::make_shared<c::PosixIO>(directory, c::PosixIOOptions{.flush_mode = c::FlushMode::full});
 		check(io->managed_capabilities().complete());
 		auto first = std::shared_ptr<c::File>(io->create_exclusive("anchor"));
 		check(first->write_at(0, "proof") == 5);

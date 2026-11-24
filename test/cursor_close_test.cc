@@ -139,7 +139,7 @@ int main(int argc, char **argv) {
 		for (bool fail : {false, true}) {
 			Probe probe;
 			probe.owner = std::this_thread::get_id();
-			auto backend = std::make_shared<c::PosixIO>(directory, {.flush_mode = c::FlushMode::full});
+			auto backend = std::make_shared<c::PosixIO>(directory, c::PosixIOOptions{.flush_mode = c::FlushMode::full});
 			auto queue = std::make_unique<c::NativeQueue>();
 			auto stream = ::opendir(directory.c_str());
 			check(stream != nullptr);

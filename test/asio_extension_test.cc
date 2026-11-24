@@ -365,7 +365,7 @@ int main(int argc, char **argv) {
 		std::filesystem::path directory(argv[1]);
 		check(std::filesystem::create_directory(directory));
 		std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
-		auto backend = std::make_shared<c::PosixIO>(directory, {.flush_mode = c::FlushMode::full});
+		auto backend = std::make_shared<c::PosixIO>(directory, c::PosixIOOptions{.flush_mode = c::FlushMode::full});
 		{
 			auto file = backend->create_exclusive("anchor");
 			check(file->write_at(0, "proof") == 5);

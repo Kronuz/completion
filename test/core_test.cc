@@ -128,7 +128,7 @@ int main(int argc, char **argv) {
 		}
 		std::filesystem::remove(directory / "owner.lock");
 		{
-			auto io = std::make_shared<c::PosixIO>(directory, {.flush_mode = c::FlushMode::full});
+			auto io = std::make_shared<c::PosixIO>(directory, c::PosixIOOptions{.flush_mode = c::FlushMode::full});
 			auto owner = std::shared_ptr<c::OwnerLock>(io->acquire_owner(true));
 			auto bytes = std::make_shared<const std::string>(65537, 'x');
 			c::Token token;

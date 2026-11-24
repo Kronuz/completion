@@ -585,7 +585,7 @@ void lifetime(const fs::path& directory) {
 		~Owner() { lock.reset(); }
 	};
 	fresh(directory);
-	auto io = std::make_shared<j::PosixIO>(directory, {.flush_mode = j::FlushMode::full});
+	auto io = std::make_shared<j::PosixIO>(directory, j::PosixIOOptions{.flush_mode = j::FlushMode::full});
 	auto owner = std::make_shared<Owner>();
 	owner->io = io;
 	owner->lock = io->acquire_owner(j::OwnerLockOptions{Mode::both, j::OwnerFile::create_exclusive});
