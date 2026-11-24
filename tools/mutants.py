@@ -3,14 +3,15 @@
 # SPDX-License-Identifier: MIT
 """Mutation check of the owner lock and the SyncFiles and OrderFiles primitives.
 
-Applies each of 29 small breaks to the owner-lock, sync and staging code (include/completion/posix.h, posix_sync.h, io.h, image.h)
+Applies each of 33 small breaks to the owner-lock, sync and staging code (include/completion/posix.h, posix_sync.h, io.h, image.h)
 in a scratch copy of the repository, rebuilds the CTest suite, runs it, and requires the
 outcome to be the one expected: the suite fails (the mutant is killed) or, for the mutants
 whose break nothing can observe, passes (it survives). m1 to m14 are the ones the CL-2 review
 (docs/reviews/cl-2-code.md, finding CL2-5) listed; s1 to s8 break the sync primitives and the read-only opens (the device
 flush, the ordering barrier, the directory sync, a file's fsync, which primitive runs, the read-only flag); t1 and t2 break the
-Stage policy of image preparation (the stop before the sync, the close after a failure); f1 to f5 break the flush mode
-(plain issuing F_FULLFSYNC, full issuing fsync, full falling back to fsync). Each is an exact-anchor replacement
+Stage policy of image preparation (the stop before the sync, the close after a failure); f1 to f9 break the flush mode
+(plain issuing F_FULLFSYNC, full issuing fsync, full falling back to fsync, a plain batch weakening a full file, a reusable
+file losing its mode, a mode nobody chose). Each is an exact-anchor replacement
 that must match exactly once.
 
   python3 tools/mutants.py                run all, in a copy under the temp directory
@@ -177,6 +178,22 @@ MUTANTS = [
            '\t\tcase SyncCall::full_fsync: { const int r = full_sync(fd); return r < 0 && (errno == ENOTSUP || errno == EOPNOTSUPP || errno == ENOTTY) ? sync(fd) : r; }',
            expect={"Darwin": "killed", "default": "survived"},
            why="sync_calls_test full_refusal requires File::sync, sync_data and sync_directory to fail with the full flush's errno"),
+    Mutant("f6", "a plain batch syncs a full file with its own calls", POSIX,
+           '\t\t\tif (posix && !batch_weakens(posix->flush_mode(), sync_calls_.mode)) {', '\t\t\tif (posix) {',
+           expect={"Darwin": "killed", "default": "survived"},
+           why="sync_primitives_test cross_backend records a full file's F_FULLFSYNC in a plain batch; only macOS's modes differ"),
+    Mutant("f7", "a reusable file syncs as plain whatever its backend's mode", POSIX,
+           '\t\texplicit ReusableFile(const PosixIO& io) : detail::PosixFile(-1, io.sync_calls_), owner(io.instance_) {}',
+           '\t\texplicit ReusableFile(const PosixIO& io) : detail::PosixFile(-1, {FlushMode::plain, io.sync_calls_.seam}), owner(io.instance_) {}',
+           expect={"Darwin": "killed", "default": "survived"},
+           why="sync_primitives_test reusable records a full backend's reusable file's F_FULLFSYNC; only macOS's modes differ"),
+    Mutant("f8", "FlushMode admits any value", POSIX_SYNC,
+           '\t\t: value_(value == plain || value == full ? value : throw std::invalid_argument("flush mode must be plain or full")) {}',
+           '\t\t: value_(value) {}',
+           why="sync_primitives_test flush_mode_values builds a FlushMode from 0, 3 and 255"),
+    Mutant("f9", "PosixIO admits options whose bytes hold no mode", POSIX,
+           '\t\tif (!(options.flush_mode == FlushMode::plain) && !(options.flush_mode == FlushMode::full)) {', '\t\tif (false) {',
+           why="sync_primitives_test flush_mode_values builds a PosixIO from options whose mode bytes are 0, 3 and 255"),
     Mutant("s7", "Open ignores read_only", OPERATION,
            '\t\t\tresult.file = request.read_only ? io.open_existing_read_only(request.source) : io.open_existing(request.source);',
            '\t\t\tresult.file = io.open_existing(request.source);',
