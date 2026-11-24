@@ -24,6 +24,9 @@ Upgrading a pin from before 2026-10-30: [the consumer upgrade note](https://gith
   loss. Before, durable syncs were always `F_FULLFSYNC` and ordering points `F_BARRIERFSYNC`,
   a sequence neither mode issues now. Linux and FreeBSD make the same calls as before in both
   modes. Full mode never falls back to `fsync`: a failed `F_FULLFSYNC` fails the call.
+- **`sync_call(SyncSite, FlushMode, SyncPlatform)`** (added, `posix_sync.h`) is the one table from a
+  sync site (`file`, `data`, `directory`, `order`) and the mode to the call (`fsync`, `fdatasync`,
+  `full_fsync`, `barrier_fsync`); every sync PosixIO makes is the call it names.
 - `PosixIO::replace_sync_calls` covers `File::sync`, `File::sync_data` and the owner lock file,
   through the files opened after it is set; on Linux it takes `fdatasync` too:
   `replace_sync_calls(fsync, fdatasync, writeback)`.
