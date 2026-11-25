@@ -4,9 +4,9 @@ project(completion LANGUAGES CXX)
 # Completion-based file I/O: native backends (io_uring on Linux, kqueue on BSD and macOS,
 # a thread pool elsewhere), image publication, and directory scans. Header-only.
 include(FetchContent)
-FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG 9db73de5c5401061ad5ee4829c8f13416754d8a3)
+FetchContent_Declare(metrics GIT_REPOSITORY https://github.com/Kronuz/metrics.git GIT_TAG 4cd64db406a2a4845b00b4be00ed7fd560a85b22)
 # Shared owning PMR allocation contexts, without global allocation overrides.
-FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG 07de45d180f23e2552b9504a6b4d506651594d1e)
+FetchContent_Declare(allocators GIT_REPOSITORY https://github.com/Kronuz/allocators.git GIT_TAG ae775ab995db8e9875e97eae0f01cf634383cd97)
 FetchContent_MakeAvailable(metrics allocators)
 
 find_package(Threads REQUIRED)
@@ -29,7 +29,7 @@ if(COMPLETION_ASIO OR COMPLETION_TASK)
   if(NOT DEFINED TASK_ASIO)
     set(TASK_ASIO ${COMPLETION_ASIO})
   endif()
-  FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 95798a02f68c86f070401329a05c78d326ac2579)
+  FetchContent_Declare(task GIT_REPOSITORY https://github.com/Kronuz/task.git GIT_TAG 477a7d3f15a8951f2047616b834753177d838a8b)
   FetchContent_MakeAvailable(task)
   add_library(completion_task INTERFACE)
   target_link_libraries(completion_task INTERFACE completion::completion task::task)
